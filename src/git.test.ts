@@ -19,7 +19,7 @@ async function setup() {
   await writeFile(join(repo, 'a.txt'), 'one\n');
   sh(repo, 'add', '-A');
   sh(repo, 'commit', '-m', 'init');
-  return { root, repo, wt: join(root, 'wt', 'T-1') };
+  return { root, repo, wt: join(root, 'home', 'worktrees', 'r', 'T-1') };
 }
 
 test('addWorktree creates branch at base, idempotent', async () => {
@@ -149,9 +149,53 @@ test('advanceTarget moved when checked-out HEAD differs; removeWorktree idempote
   assert.equal(await g.advanceTarget(repo, 'main', newSha, newSha), 'moved');
   await g.removeWorktree(repo, wt);
   await g.removeWorktree(repo, wt);
-  const d = join(root, 'det');
+  const d = join(root, 'home', 'worktrees', 'r', 'det');
   await g.addDetachedWorktree(repo, d, oldSha);
   assert.equal(sh(d, 'rev-parse', 'HEAD'), oldSha);
   await g.removeWorktree(repo, d);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('removeWorktree of B does not break A whose .git was deleted', async () => {
+  const { root, repo, wt } = await setup();
+  const b = join(root, 'home', 'worktrees', 'r', 'T-2');
+  await g.addWorktree(repo, wt, 'sf/T-1', 'main');
+  await g.addWorktree(repo, b, 'sf/T-2', 'main');
+  await rm(join(wt, '.git'));
+  await g.removeWorktree(repo, b);
+  await writeFile(join(wt, 'x.txt'), 'x\n');
+  assert.ok(await g.commitAll(repo, wt, 'x'));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('addWorktree recreates after remove (branch kept) and after dir deleted', async () => {
+  const { root, repo, wt } = await setup();
+  await g.addWorktree(repo, wt, 'sf/T-1', 'main');
+  await writeFile(join(wt, 'x.txt'), 'x\n');
+  const sha = await g.commitAll(repo, wt, 'x');
+  await g.removeWorktree(repo, wt);
+  await g.addWorktree(repo, wt, 'sf/T-1', 'main');
+  assert.equal(sh(wt, 'rev-parse', 'HEAD'), sha);
+  await rm(wt, { recursive: true, force: true });
+  await g.addWorktree(repo, wt, 'sf/T-1', 'main');
+  assert.equal(sh(wt, 'rev-parse', 'HEAD'), sha);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('removeWorktree refuses paths outside SF_HOME/worktrees', async () => {
+  const { root, repo } = await setup();
+  await assert.rejects(g.removeWorktree(repo, repo));
+  await access(join(repo, 'a.txt'));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('failing post-checkout hook does not run on addWorktree', async () => {
+  const { root, repo, wt } = await setup();
+  await mkdir(join(repo, '.husky'));
+  await writeFile(join(repo, '.husky', 'post-checkout'), '#!/bin/sh\necho x > HOOK_RAN\nexit 1\n');
+  sh(repo, 'config', 'core.hooksPath', '.husky');
+  await g.addWorktree(repo, wt, 'sf/T-1', 'main');
+  await assert.rejects(access(join(wt, 'HOOK_RAN')));
+  await assert.rejects(access(join(repo, 'HOOK_RAN')));
   await rm(root, { recursive: true, force: true });
 });
