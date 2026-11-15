@@ -72,4 +72,5 @@ export interface AgentResult {
   question?: string;
   findings?: Finding[];
   costUsd?: number;
+  resetAt?: string;
 }
