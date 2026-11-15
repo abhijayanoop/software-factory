@@ -12,6 +12,7 @@ import * as actions from './actions.ts';
 import { SbxSandbox } from './sandbox.ts';
 import { acquireLock, createServer } from './server.ts';
 import { createSupervisor, pidAlive, recover } from './supervisor.ts';
+import { doctor as runDoctor } from './doctor.ts';
 import { detectProfile } from './profiles.ts';
 import { TRANSITIONS } from './states.ts';
 import type { RepoProfile, TicketState } from './types.ts';
@@ -144,6 +145,11 @@ const serve: Cmd = async (argv) => {
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
+};
+
+const doctorCmd: Cmd = async (argv) => {
+  const { v } = opts(argv, { fix: { type: 'boolean' } }, 0);
+  if (await runDoctor(db(), !!v.fix)) process.exitCode = 1;
 };
 
 const nested = (table: Record<string, Cmd>): Cmd => async (argv) => {
