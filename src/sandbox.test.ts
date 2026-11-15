@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { buildSbxCreateArgs, buildSbxExecArgs, FakeSandbox } from './sandbox.ts';
 
 test('buildSbxCreateArgs maps ro mounts to PATH:ro and adds --static-mcp context7', () => {
-  const a = buildSbxCreateArgs('sf-r-T-1', [{ path: 'C:\w' }, { path: 'C:\git', ro: true }]);
-  assert.deepEqual(a, ['--no-input', 'create', 'claude', 'C:\w', 'C:\git:ro', '--name', 'sf-r-T-1',
+  const a = buildSbxCreateArgs('sf-r-T-1', [{ path: 'C:/w' }, { path: 'C:/git', ro: true }]);
+  assert.deepEqual(a, ['--no-input', 'create', 'claude', 'C:/w', 'C:/git:ro', '--name', 'sf-r-T-1',
     '-t', 'sf-claude-node24', '--pull', 'never', '--static-mcp', 'context7']);
   assert.equal(buildSbxCreateArgs('n', [{ path: 'p', ro: true }])[3], 'p:ro');
 });

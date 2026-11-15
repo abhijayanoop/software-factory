@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import type { AgentResult, AgentRole, Finding } from './types.ts';
 import type { Sandbox } from './sandbox.ts';
 
@@ -60,9 +60,15 @@ export async function runAgent(
 ): Promise<AgentResult> {
   const argv = ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions'];
   if (opts.systemPrompt) argv.push('--append-system-prompt', opts.systemPrompt);
+  let before = 0;
+  try { before = statSync(logPath).size; } catch { /* no log yet */ }
   const r = await sb.exec(name, argv, { stdin: prompt, timeoutMs: opts.timeoutMs ?? TIMEOUTS[role], logPath, onPid: opts.onPid, signal: opts.signal });
   if (r.timedOut) return { ok: false, kind: 'timeout', summary: 'timed out' };
-  const parsed = parseStream(existsSync(logPath) ? readFileSync(logPath, 'utf8') : '');
+  if (opts.signal?.aborted) return { ok: false, kind: 'error', summary: 'aborted' };
+  // parse only this run's bytes: the log is append-only and may hold an earlier run
+  let out = '';
+  try { out = readFileSync(logPath).subarray(before).toString('utf8'); } catch { /* no output */ }
+  const parsed = parseStream(out);
   if (parsed.kind === 'error' && r.code !== 0) parsed.summary += ` (exit code ${r.code})`;
   return parsed;
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseStream, runAgent } from './agent.ts';
@@ -54,4 +54,20 @@ test('runAgent passes prompt on stdin, not argv, and parses log', async () => {
   assert.equal(c.stdin, 'SECRET TICKET');
   assert.ok(!c.argv.includes('SECRET TICKET'));
   assert.deepEqual(c.argv.slice(-2), ['--append-system-prompt', 'SYS']);
+});
+
+test('runAgent ignores a stale result already in the log', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sf-agent-'));
+  const log = join(dir, 'l.jsonl');
+  writeFileSync(log, fx('stream-done.jsonl'));
+  const r = await runAgent(new FakeSandbox(() => ({ code: 1 })), 'n', 'build', 'p', log);
+  assert.equal(r.kind, 'error');
+});
+
+test('runAgent returns error aborted when signal aborted, even with a done result', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sf-agent-'));
+  const ac = new AbortController();
+  const sb = new FakeSandbox(() => { ac.abort(); return { code: 0, stdout: fx('stream-done.jsonl') }; });
+  const r = await runAgent(sb, 'n', 'build', 'p', join(dir, 'l.jsonl'), { signal: ac.signal });
+  assert.deepEqual(r, { ok: false, kind: 'error', summary: 'aborted' });
 });
