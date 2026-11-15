@@ -1,0 +1,1 @@
+{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":429,"result":"Claude usage limit reached. Your limit will reset at 2026-11-15T23:00:00Z.","total_cost_usd":0,"terminal_reason":"error"}
