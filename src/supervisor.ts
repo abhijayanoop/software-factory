@@ -235,8 +235,13 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     // Cancelled during this step (mid-run abort, or a lost CAS after the run): free its sandbox and worktree.
     if (t.state !== 'specifying' && store.getTicket(db, t.id)?.state === 'cancelled') {
       const { wt, name } = paths(store.getTicket(db, t.id)!);
-      await sb.remove(name);
-      await removeWorktree(repo.path, wt);
+      try {
+        await sb.remove(name);
+        await removeWorktree(repo.path, wt);
+      } catch (e) {
+        // step must not reject (the serve loop calls it forever); sf doctor finds the leftovers
+        try { store.note(db, t.id, { cleanupFailed: (e as Error).message }); } catch { console.error('cancel cleanup failed', e); }
+      }
     }
     return 'worked';
   }

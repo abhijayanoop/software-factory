@@ -231,3 +231,15 @@ test('an empty spec result is a failure, not an empty spec', async () => {
   assert.equal(t.spec, null);
   assert.deepEqual(runKinds(db), ['spec', 'spec', 'spec']);
 });
+
+test('a failing cancel cleanup is noted, step still resolves', async () => {
+  const { db } = setup();
+  const sb = new FakeSandbox((argv) => ({ code: 0, hang: argv[0] === 'claude' }));
+  sb.remove = async () => { throw new Error('sbx rm exploded'); };
+  const sup = createSupervisor({ db, sandbox: sb, heartbeatMs: 10 });
+  await sup.step(); // preparing -> building
+  const p = sup.step();
+  setTimeout(() => transition(db, 'T-1', 'building', 'cancelled', { type: 'transition', actor: 'human' }), 30);
+  assert.equal(await p, 'worked');
+  assert.ok(events(db, 'T-1').some((e) => e.type === 'note' && e.dataJson!.includes('sbx rm exploded')));
+});
