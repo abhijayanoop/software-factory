@@ -24,3 +24,8 @@ test('tx rolls back on throw', () => {
 test('rowTo camelCases columns', () => {
   assert.deepEqual(rowTo({ repo_id: 'r', worktree_path: null }), { repoId: 'r', worktreePath: null });
 });
+
+test('tx failing rollback does not mask original error', () => {
+  const stub = { exec: (sql: string) => { if (sql === 'ROLLBACK') throw new Error('rollback failed'); } };
+  assert.throws(() => tx(stub as never, () => { throw new Error('orig'); }), /orig/);
+});

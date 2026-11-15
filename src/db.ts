@@ -65,8 +65,13 @@ export function migrate(db: DatabaseSync): void {
   const v = db.prepare('PRAGMA user_version').get()!.user_version as number;
   if (v < 1) {
     db.exec('BEGIN IMMEDIATE');
-    try { db.exec(SCHEMA_V1); db.exec('PRAGMA user_version = 1'); db.exec('COMMIT'); }
-    catch (e) { db.exec('ROLLBACK'); throw e; }
+    try {
+      // another process may have migrated between our read and the lock
+      if ((db.prepare('PRAGMA user_version').get()!.user_version as number) < 1) {
+        db.exec(SCHEMA_V1); db.exec('PRAGMA user_version = 1');
+      }
+      db.exec('COMMIT');
+    } catch (e) { try { db.exec('ROLLBACK'); } catch { /* keep original error */ } throw e; }
   }
 }
 
@@ -80,7 +85,7 @@ export function openDb(path: string): DatabaseSync {
 export function tx<T>(db: DatabaseSync, fn: () => T): T {
   db.exec('BEGIN IMMEDIATE');
   try { const r = fn(); db.exec('COMMIT'); return r; }
-  catch (e) { db.exec('ROLLBACK'); throw e; }
+  catch (e) { try { db.exec('ROLLBACK'); } catch { /* keep original error */ } throw e; }
 }
 
 /** snake_case row -> camelCase object (callers cast to Ticket/Run/...). */
