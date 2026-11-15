@@ -8,7 +8,7 @@ State lives in SQLite under `~/.sf` (override with `SF_HOME`). You approve in a 
 - Node 24+
 - git 2.38+ (needs `merge-tree --write-tree`)
 - Docker Sandboxes (`sbx`)
-- Claude Code (`claude`)
+- Claude Code, only for the /sf skill session (sf itself runs claude inside the sandbox, never on the host)
 - uv
 - graphify (optional, enables graph updates)
 
@@ -24,8 +24,8 @@ sf doctor           # checks tools, template, secret, orphans
 Create the sandbox template with Node 24 (the default image has none). Start a spike sandbox, install Node 24 as root, then save it:
 
 ```sh
-sbx --no-input create claude <any-dir> --name sf-spike
-sbx exec -u root sf-spike sh -c 'curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs'
+sbx --no-input create claude <scratch-dir> --name sf-spike
+sbx exec -u root sf-spike bash -c "curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs"
 sbx --no-input template save sf-spike sf-claude-node24
 sbx rm --force sf-spike
 ```

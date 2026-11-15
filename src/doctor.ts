@@ -9,7 +9,7 @@ import { SbxSandbox } from './sandbox.ts';
 
 const TOOLS: { name: string; required: boolean }[] = [
   { name: 'git', required: true }, { name: 'sbx', required: true },
-  { name: 'claude', required: true }, { name: 'uv', required: true }, { name: 'graphify', required: false },
+  { name: 'uv', required: true }, { name: 'graphify', required: false },
 ];
 
 export function runCmd(cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
