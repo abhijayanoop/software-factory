@@ -68,6 +68,28 @@ test('ready on a new ticket exits 1 with illegal transition', async () => {
   }
 });
 
+test('gate actions validate flags, ids and state', async () => {
+  const { root, repo, sf } = await setup();
+  try {
+    sf('repo', 'add', repo);
+    const id = sf('ticket', 'add', 'my-repo', '--title', 't', '--body', 'b').out.trim();
+    assert.match(sf('reject', id).err, /--note required/);
+    assert.match(sf('answer', id, '--note', 'x').err, /Unknown option/);
+    assert.match(sf('approve', 'nope').err, /invalid ticket id/);
+    const r = sf('approve', id);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /illegal transition new -> integrating/);
+    const h = new DatabaseSync(join(root, 'home', 'sf.db'));
+    h.prepare("UPDATE tickets SET state='awaiting_approval', attempt=2 WHERE id=?").run(id);
+    h.close();
+    assert.equal(sf('reject', id, '--note', 'redo it').code, 0);
+    const t = JSON.parse(sf('ticket', 'show', id, '--json').out);
+    assert.deepEqual([t.state, t.attempt, t.humanNote], ['ready', 0, 'redo it']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('ticket title is stored verbatim', async () => {
   const { root, repo, sf } = await setup();
   try {

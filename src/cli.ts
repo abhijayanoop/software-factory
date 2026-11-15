@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { openDb, sfHome } from './db.ts';
 import * as store from './store.ts';
 import * as git from './git.ts';
+import * as actions from './actions.ts';
+import { SbxSandbox } from './sandbox.ts';
 import { detectProfile } from './profiles.ts';
 import { TRANSITIONS } from './states.ts';
 import type { RepoProfile, TicketState } from './types.ts';
@@ -97,6 +99,16 @@ const spec: Cmd = async (argv) => {
 
 const ready: Cmd = async (argv) => move(db(), opts(argv, {}, 1).p[0]!, 'ready', 'human');
 
+// Human gate actions: validate the id at the edge, map a lost CAS to a retry hint.
+const act = (options: Record<string, { type: 'string' }>, f: (d: Db, id: string, v: Record<string, string>) => boolean | Promise<boolean>): Cmd =>
+  async (argv) => {
+    const { v, p } = opts(argv, options, 1);
+    for (const k of Object.keys(options)) if (typeof v[k] !== 'string') fail(`--${k} required`);
+    const d = db();
+    if (!(await f(d, ticketOf(d, p[0]!).id, v as Record<string, string>))) fail('ticket state changed, retry');
+  };
+const sandbox = () => new SbxSandbox();
+
 const nested = (table: Record<string, Cmd>): Cmd => async (argv) => {
   const sub = table[argv[0] ?? ''] ?? fail(`unknown subcommand: ${argv[0] ?? ''}`);
   await sub(argv.slice(1));
@@ -107,6 +119,12 @@ const commands: Record<string, Cmd> = {
   ticket: nested({ add: ticketAdd, list: ticketList, show: ticketShow }),
   spec,
   ready,
+  approve: act({}, (d, id) => actions.approve(d, id)),
+  reject: act({ note: { type: 'string' } }, (d, id, v) => actions.reject(d, id, v.note!)),
+  answer: act({ text: { type: 'string' } }, (d, id, v) => actions.answer(d, id, v.text!)),
+  retry: act({}, (d, id) => actions.retry(d, id)),
+  reset: act({}, (d, id) => actions.reset({ db: d, sandbox: sandbox() }, id)),
+  cancel: act({}, (d, id) => actions.cancel({ db: d, sandbox: sandbox() }, id)),
 };
 
 export async function main(argv: string[]): Promise<number> {

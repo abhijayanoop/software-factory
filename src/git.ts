@@ -167,3 +167,9 @@ export async function pathTracked(repoPath: string, ref: string, path: string): 
   const common = await commonGitDir(repoPath);
   return (await ok([`--git-dir=${common}`, 'ls-tree', '--name-only', ref, '--', path])).trim() !== '';
 }
+
+// Drops a branch ref (no-op if missing). Used by reset, after its worktree is removed.
+export async function deleteBranch(repoPath: string, branch: string): Promise<void> {
+  const common = await commonGitDir(repoPath);
+  await ok([`--git-dir=${common}`, 'update-ref', '-d', `refs/heads/${branch}`]);
+}

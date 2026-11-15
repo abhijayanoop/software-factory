@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { sfHome } from './db.ts';
 import * as store from './store.ts';
 import { ACTIVE, canTransition } from './states.ts';
-import { addDetachedWorktree, addWorktree, commitAll, commonGitDir, diff, pathTracked, removeWorktree, revParse } from './git.ts';
+import { addDetachedWorktree, addWorktree, advanceTarget, commitAll, commonGitDir, diff, mergeTree, pathTracked, removeWorktree, revParse, squashCommit } from './git.ts';
 import type { ExecOpts, Sandbox } from './sandbox.ts';
 import { runAgent, TIMEOUTS } from './agent.ts';
 import { systemPrompt, taskPrompt } from './prompts.ts';
@@ -159,8 +159,8 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     const { wt, name } = paths(t);
     const prev = store.latestRun(db, t.id, ['verify', 'review']);
     const failureTail = prev?.state === 'failed' && prev.resultJson ? JSON.parse(prev.resultJson).failureTail : undefined;
-    // partialWork (lost-run recovery) arrives with Task 9.
-    const prompt = taskPrompt('build', t, { failureTail, partialWork: false, checks: profile.checks.map((c) => c.cmd.join(' ')) });
+    const partialWork = store.latestRun(db, t.id, ['build'])?.state === 'lost';
+    const prompt = taskPrompt('build', t, { failureTail, partialWork, checks: profile.checks.map((c) => c.cmd.join(' ')) });
     const res = await withRun(t, 'build', name, agent(name, 'build', prompt));
     if (!res || setback(t, res.runId, res.out)) return;
     const head = (await commitAll(repo.path, wt, `${t.id}: ${t.title} (attempt ${t.attempt + 1})`)) ?? (await revParse(repo.path, `sf/${t.id}`));
@@ -208,12 +208,57 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     } finally { await sb.remove(name); }
   }
 
+  // Profile setup + checks on the squash commit in a throwaway checkout; returns the failure, or null.
+  async function recheck(t: Ticket, repo: Repo, profile: RepoProfile, sha: string, c: RunCtx): Promise<string | null> {
+    const wt = join(sfHome(), 'worktrees', repo.id, `${t.id}-integrate`);
+    const name = `sf-${repo.id}-${t.id}-integrate`;
+    try {
+      await removeWorktree(repo.path, wt); // a crashed earlier integrate may have left one
+      await addDetachedWorktree(repo.path, wt, sha);
+      await create(name, [{ path: wt }]);
+      for (const k of [...profile.setup.map((cmd) => ({ name: cmd.join(' '), cmd })), ...profile.checks]) {
+        const r = await exec(name, k.cmd, { timeoutMs: TIMEOUTS.verify, logPath: c.logPath, onPid: c.onPid, signal: c.signal });
+        if (r.code !== 0 || r.timedOut) return `target moved and recheck failed: ${k.name} ${r.timedOut ? 'timed out' : `exited ${r.code}`}`;
+      }
+      return null;
+    } finally {
+      await sb.remove(name);
+      await removeWorktree(repo.path, wt);
+    }
+  }
+
+  async function integrate(t: Ticket, repo: Repo, profile: RepoProfile): Promise<void> {
+    const approved = store.events(db, t.id).some((e) => e.type === 'approval' && JSON.parse(e.dataJson ?? '{}').headSha === t.headSha);
+    if (!t.headSha || !approved) { block(t.id, 'integrating', 'approval stale'); return; }
+    const { wt, name } = paths(t);
+    const res = await withRun(t, 'integrate', name, async (c): Promise<{ fail: string } | { sha: string; tip: string }> => {
+      const tip = await revParse(repo.path, repo.targetBranch);
+      const m = await mergeTree(repo.path, tip, t.headSha!); // the approved commit, not whatever sf/<id> is now
+      if ('conflict' in m) return { fail: `merge conflict: ${m.conflict.join(', ')}` };
+      const sha = await squashCommit(repo.path, m.tree, tip, `${t.id}: ${t.title}\n\nFactory-Ticket: ${t.id}`);
+      const fail = tip === t.baseSha ? null : await recheck(t, repo, profile, sha, c);
+      return fail ? { fail } : { sha, tip };
+    });
+    if (!res) return;
+    const out = res.out;
+    const adv = 'fail' in out ? out.fail : await advanceTarget(repo.path, repo.targetBranch, out.sha, out.tip);
+    if ('fail' in out || adv !== 'ok') {
+      const reason = adv === 'dirty' ? 'target branch checkout is dirty' : adv === 'moved' ? 'target branch moved' : adv;
+      store.finishRun(db, res.runId, 'failed', { reason });
+      block(t.id, 'integrating', reason, res.runId);
+      return;
+    }
+    store.finishRun(db, res.runId, 'succeeded', { squashSha: out.sha });
+    if (!store.transition(db, t.id, 'integrating', 'done', ev(res.runId, { squashSha: out.sha }))) return;
+    await sb.remove(name);
+    await removeWorktree(repo.path, wt); // the sf/<id> branch is kept
+  }
+
   async function step(): Promise<'worked' | 'idle' | 'paused'> {
     if (pausedUntil && clock() < pausedUntil) return 'paused';
     pausedUntil = null;
     if (store.activeRun(db)) return 'idle';
-    // integrating is handled by the integrator (Task 10), not here.
-    const t = store.listTickets(db).filter((x) => ACTIVE.includes(x.state) && x.state !== 'integrating')
+    const t = store.listTickets(db).filter((x) => ACTIVE.includes(x.state))
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))[0];
     if (!t) return 'idle';
     const repo = store.getRepo(db, t.repoId)!;
@@ -224,6 +269,7 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
       else if (t.state === 'building') await build(t, repo, profile);
       else if (t.state === 'verifying') await verify(t, profile);
       else if (t.state === 'reviewing') await review(t, repo);
+      else if (t.state === 'integrating') await integrate(t, repo, profile);
     } catch (e) {
       // infra failure (git, sandbox, setup): never leave a run open (it would freeze the slot), park the ticket
       const msg = (e as Error).message;
@@ -247,4 +293,14 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
   }
 
   return { step };
+}
+
+// Startup recovery (spec §9): a starting/running run whose process is gone becomes `lost`; its ticket
+// keeps its state, so the next step re-dispatches it (a re-build gets partialWork).
+export function recover(db: DatabaseSync, isAlive: (pid: number) => boolean): void {
+  for (const r of store.openRuns(db)) if (r.pid === null || !isAlive(r.pid)) store.finishRun(db, r.id, 'lost');
+}
+
+export function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
 }

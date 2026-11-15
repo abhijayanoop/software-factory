@@ -119,3 +119,6 @@ export function note(db: DatabaseSync, ticketId: string, data: unknown, runId?: 
 
 export const latestRun = (db: DatabaseSync, ticketId: string, kinds: Run['kind'][]): Run | undefined =>
   get<Run>(db, `SELECT * FROM runs WHERE ticket_id=? AND kind IN (${kinds.map(() => '?').join(',')}) ORDER BY id DESC LIMIT 1`, ticketId, ...kinds);
+
+export const openRuns = (db: DatabaseSync): Run[] =>
+  all<Run>(db, "SELECT * FROM runs WHERE state IN ('starting','running') ORDER BY id");
