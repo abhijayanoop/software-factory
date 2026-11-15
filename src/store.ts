@@ -16,6 +16,10 @@ export function addRepo(db: DatabaseSync, r: { id: string; path: string; targetB
   return getRepo(db, r.id)!;
 }
 
+export function setProfile(db: DatabaseSync, id: string, profile: RepoProfile): void {
+  db.prepare('UPDATE repos SET profile_json=? WHERE id=?').run(JSON.stringify(profile), id);
+}
+
 export const getRepo = (db: DatabaseSync, id: string): Repo | undefined => get<Repo>(db, 'SELECT * FROM repos WHERE id=?', id);
 
 export function createTicket(db: DatabaseSync, t: { repoId: string; title: string; body: string }): Ticket {

@@ -31,8 +31,8 @@ test('createTicket ids increment', () => {
 
 test('transition CAS', () => {
   const db = setup(); mk(db);
-  assert.equal(transition(db, 'T-1', 'new', 'specifying', sup()), true);
-  assert.equal(transition(db, 'T-1', 'new', 'specifying', sup()), false);
+  assert.equal(transition(db, 'T-1', 'new', 'specifying', hum()), true);
+  assert.equal(transition(db, 'T-1', 'new', 'specifying', hum()), false);
   assert.equal(events(db, 'T-1').length, 1);
   assert.equal(eventsSince(db, 0).length, 1);
   assert.equal(eventsSince(db, events(db, 'T-1')[0].id).length, 0);
@@ -46,7 +46,7 @@ test('transition illegal throws', () => {
 test('transition validates actor', () => {
   const db = setup(); mk(db);
   assert.throws(() => transition(db, 'T-1', 'new', 'specified', sup()), /illegal transition/);
-  assert.throws(() => transition(db, 'T-1', 'new', 'specifying', hum()), /illegal transition/);
+  assert.throws(() => transition(db, 'T-1', 'new', 'specifying', sup()), /illegal transition/);
   assert.equal(transition(db, 'T-1', 'new', 'specified', hum()), true);
 });
 
@@ -83,9 +83,9 @@ test('blocked exits restricted to blocked_from, ready, cancelled', () => {
 
 test('patch applied atomically', () => {
   const db = setup(); mk(db);
-  assert.equal(transition(db, 'T-1', 'new', 'specifying', sup(), { attempt: 2 }), true);
+  assert.equal(transition(db, 'T-1', 'new', 'specifying', hum(), { attempt: 2 }), true);
   assert.equal(getTicket(db, 'T-1')!.attempt, 2);
-  assert.equal(transition(db, 'T-1', 'new', 'specifying', sup(), { attempt: 9 }), false);
+  assert.equal(transition(db, 'T-1', 'new', 'specifying', hum(), { attempt: 9 }), false);
   assert.equal(getTicket(db, 'T-1')!.attempt, 2);
   assert.throws(() => patchTicket(db, 'T-1', 'specifying', { id: 'x' } as never), /unknown patch field/);
   assert.equal(patchTicket(db, 'T-1', 'specifying', { attempt: 3, headSha: 'abc' }), true);

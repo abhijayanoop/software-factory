@@ -22,7 +22,7 @@ export const TRANSITIONS: Record<TicketState, TicketState[]> = {
 };
 
 export const HUMAN = new Set<string>([
-  'new>specified', 'specified>ready', 'awaiting_approval>integrating', 'awaiting_approval>ready',
+  'new>specified', 'new>specifying', 'specified>ready', 'awaiting_approval>integrating', 'awaiting_approval>ready',
   ...TRANSITIONS.blocked.map((t) => `blocked>${t}`),
   ...Object.keys(TRANSITIONS).filter((s) => TRANSITIONS[s as TicketState].includes('cancelled')).map((s) => `${s}>cancelled`),
 ]);

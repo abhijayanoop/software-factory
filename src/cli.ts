@@ -32,7 +32,7 @@ function ticketOf(d: Db, id: string) {
 }
 
 // Moves from the ticket's actual current state, so a wrong state surfaces as "illegal transition".
-function move(d: Db, id: string, to: TicketState, actor: 'human' | 'supervisor', patch = {}) {
+function move(d: Db, id: string, to: TicketState, actor: 'human', patch = {}) {
   const t = ticketOf(d, id);
   if (!store.transition(d, id, t.state, to, { type: 'transition', actor }, patch)) fail('ticket state changed, retry');
 }
@@ -55,8 +55,11 @@ const repoProfile: Cmd = async (argv) => {
   const d = db();
   const repo = store.getRepo(d, p[0]!) ?? fail(`no such repo: ${p[0]}`);
   const profile = JSON.parse(readFileSync(v.file as string, 'utf8')) as RepoProfile;
-  if (!Array.isArray(profile.setup) || !Array.isArray(profile.checks)) fail('invalid profile');
-  d.prepare('UPDATE repos SET profile_json=? WHERE id=?').run(JSON.stringify(profile), repo.id);
+  const strs = (x: unknown) => Array.isArray(x) && x.every((s) => typeof s === 'string');
+  const ok = (profile.kind === 'ts' || profile.kind === 'py') && Array.isArray(profile.setup) && profile.setup.every(strs)
+    && Array.isArray(profile.checks) && profile.checks.every((k) => typeof k?.name === 'string' && strs(k.cmd) && k.cmd.length > 0);
+  if (!ok) fail('invalid profile');
+  store.setProfile(d, repo.id, profile);
 };
 
 const ticketAdd: Cmd = async (argv) => {
@@ -88,8 +91,7 @@ const spec: Cmd = async (argv) => {
   const { v, p } = opts(argv, { file: { type: 'string' }, agent: { type: 'boolean' } }, 1);
   if (!v.file === !v.agent) fail('exactly one of --file / --agent required');
   const d = db();
-  // new>specifying is a supervisor edge in states.ts (not a human one), so --agent uses that actor.
-  if (v.agent) move(d, p[0]!, 'specifying', 'supervisor');
+  if (v.agent) move(d, p[0]!, 'specifying', 'human');
   else move(d, p[0]!, 'specified', 'human', { spec: readFileSync(v.file as string, 'utf8') });
 };
 

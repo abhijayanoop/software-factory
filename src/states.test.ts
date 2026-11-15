@@ -26,6 +26,7 @@ test('illegal edges', () => {
 
 test('human edges', () => {
   assert.ok(isHumanTransition('specified', 'ready'));
+  assert.ok(isHumanTransition('new', 'specifying'));
   assert.ok(isHumanTransition('awaiting_approval', 'integrating'));
   assert.ok(isHumanTransition('awaiting_approval', 'ready'));
   assert.equal(isHumanTransition('building', 'verifying'), false);
