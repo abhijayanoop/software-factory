@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { openDb } from './db.ts';
-import { addRepo, createTicket, events, getTicket, transition } from './store.ts';
+import { activeRun, addRepo, createTicket, events, getTicket, transition } from './store.ts';
 import { FakeSandbox } from './sandbox.ts';
 import { createSupervisor } from './supervisor.ts';
 
@@ -73,6 +73,10 @@ test('happy path reaches awaiting_approval', async () => {
   assert.deepEqual(runKinds(db), ['build', 'verify', 'review']);
   assert.deepEqual(sb.calls.map((c) => c.argv[0]), ['setup', 'claude', 'check', 'claude']);
   assert.equal(sb.creates[0].mounts[0].ro, undefined);
+  // review runs in its own sandbox with the worktree read-only, removed afterwards
+  assert.deepEqual(sb.creates[1], { name: 'sf-r-T-1-review', mounts: [{ path: t.worktreePath, ro: true }] });
+  assert.equal(sb.calls[3].name, 'sf-r-T-1-review');
+  assert.deepEqual(sb.removes, ['sf-r-T-1-review']);
   // graphify output is excluded, never committed
   assert.ok(!sh(repo, 'show', '--name-only', '--format=', 'sf/T-1').includes('graphify-out'));
   assert.match(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^graphify-out\/$/m);
@@ -186,4 +190,44 @@ test('setup failure -> blocked (infra) with the reason', async () => {
   assert.equal(t.state, 'blocked');
   assert.equal(t.blockedFrom, 'preparing');
   assert.match(t.blockedReason!, /^infra: setup `setup` exited 2/);
+});
+
+test('a host failure after a run finishes the run and blocks (slot not frozen)', async () => {
+  const { db, repo, wt } = setup();
+  const sb = new FakeSandbox((argv) => {
+    if (argv[0] !== 'claude') return { code: 0 };
+    writeFileSync(join(wt, 'x.txt'), 'x');
+    rmSync(join(repo, '.git', 'worktrees', 'T-1', 'gitdir')); // commitAll can no longer find the worktree
+    return { code: 0, stdout: done() };
+  });
+  assert.equal(await drive(createSupervisor({ db, sandbox: sb })), 'idle');
+  assert.equal(activeRun(db), undefined);
+  assert.equal(db.prepare('SELECT state FROM runs').get()!.state, 'failed');
+  const t = getTicket(db, 'T-1')!;
+  assert.equal(t.state, 'blocked');
+  assert.match(t.blockedReason!, /^infra: no registered worktree/);
+});
+
+test('sandbox exit 125 on a check is retried once, then blocks as infra without counting an attempt', async () => {
+  const { db, wt } = setup();
+  const sb = fake(wt, { check: () => 125 });
+  assert.equal(await drive(createSupervisor({ db, sandbox: sb })), 'idle');
+  const t = getTicket(db, 'T-1')!;
+  assert.equal(t.state, 'blocked');
+  assert.equal(t.blockedFrom, 'verifying');
+  assert.equal(t.attempt, 0);
+  assert.match(t.blockedReason!, /^infra: sandbox exec `check a` failed \(exit 125\) twice/);
+  assert.equal(sb.calls.filter((c) => c.argv[0] === 'check').length, 2);
+  assert.equal(activeRun(db), undefined);
+});
+
+test('an empty spec result is a failure, not an empty spec', async () => {
+  const { db } = setup('specifying');
+  const sb = new FakeSandbox((argv) => ({ code: 0, stdout: argv[0] === 'claude' ? result('{"status":"done","summary":"s"}') : undefined }));
+  assert.equal(await drive(createSupervisor({ db, sandbox: sb })), 'idle');
+  const t = getTicket(db, 'T-1')!;
+  assert.equal(t.state, 'blocked');
+  assert.equal(t.blockedFrom, 'specifying');
+  assert.equal(t.spec, null);
+  assert.deepEqual(runKinds(db), ['spec', 'spec', 'spec']);
 });

@@ -6,7 +6,7 @@ import { sfHome } from './db.ts';
 import * as store from './store.ts';
 import { ACTIVE, canTransition } from './states.ts';
 import { addDetachedWorktree, addWorktree, commitAll, commonGitDir, diff, pathTracked, removeWorktree, revParse } from './git.ts';
-import type { Sandbox } from './sandbox.ts';
+import type { ExecOpts, Sandbox } from './sandbox.ts';
 import { runAgent, TIMEOUTS } from './agent.ts';
 import { systemPrompt, taskPrompt } from './prompts.ts';
 import type { AgentResult, Repo, RepoProfile, Run, Ticket, TicketState } from './types.ts';
@@ -22,6 +22,7 @@ type RunCtx = { logPath: string; signal: AbortSignal; onPid: (pid: number) => vo
 
 const PAUSE_MS = 30 * 60_000;
 const TAIL_LINES = 200;
+const SBX_FAILED = 125; // sandbox infra failure, not the command's own exit code
 
 const sizeOf = (p: string) => { try { return statSync(p).size; } catch { return 0; } };
 const readFrom = (p: string, at: number) => { try { return readFileSync(p).subarray(at).toString('utf8'); } catch { return ''; } };
@@ -45,7 +46,19 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
   const block = (id: string, from: TicketState, reason: string, runId?: number) =>
     store.transition(db, id, from, 'blocked', ev(runId, { reason }), { blockedReason: reason });
   const paths = (t: Ticket) => ({ wt: t.worktreePath ?? join(sfHome(), 'worktrees', t.repoId, t.id), name: `sf-${t.repoId}-${t.id}` });
-  const cleanup = (repo: Repo, wt: string, name: string) => async () => { await sb.remove(name); await removeWorktree(repo.path, wt); };
+
+  // Spec §9: a sandbox infra failure (create throws, exec exits 125) is retried once, then thrown (-> blocked infra).
+  async function create(name: string, mounts: { path: string; ro?: boolean }[]): Promise<void> {
+    try { await sb.create(name, mounts); } catch { await sb.create(name, mounts); }
+  }
+  async function exec(name: string, argv: string[], o: ExecOpts): Promise<{ code: number; timedOut: boolean; before: number }> {
+    for (let i = 0; ; i++) {
+      const before = sizeOf(o.logPath);
+      const r = await sb.exec(name, argv, o);
+      if (r.code !== SBX_FAILED || o.signal?.aborted) return { ...r, before };
+      if (i === 1) throw new Error(`sandbox exec \`${argv.join(' ')}\` failed (exit ${SBX_FAILED}) twice`);
+    }
+  }
 
   // Count a failed attempt and move to `to`; the failure that reaches max_attempts blocks instead (R4).
   function retry(t: Ticket, to: TicketState, reason: string, runId: number): void {
@@ -56,16 +69,16 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     if (moved && attempt >= t.maxAttempts) block(t.id, to, `gave up after ${attempt} failed attempts: ${reason}`, runId);
   }
 
-  // Runs fn as a run row with heartbeats; a ticket cancelled mid-run aborts it, cleans up and yields null.
-  async function withRun<T>(
-    t: Ticket, kind: Run['kind'], name: string, onCancel: () => Promise<void>, fn: (c: RunCtx) => Promise<T>,
-  ): Promise<{ runId: number; out: T } | null> {
+  // Runs fn as a run row with heartbeats; a ticket cancelled mid-run aborts it and yields null (step cleans up).
+  async function withRun<T>(t: Ticket, kind: Run['kind'], name: string, fn: (c: RunCtx) => Promise<T>): Promise<{ runId: number; out: T } | null> {
     const runId = store.startRun(db, t.id, kind, name).id;
     const ac = new AbortController();
     let pid: number | undefined;
     const tick = () => {
-      store.heartbeat(db, runId, pid);
-      if (store.getTicket(db, t.id)?.state === 'cancelled') ac.abort();
+      try {
+        store.heartbeat(db, runId, pid);
+        if (store.getTicket(db, t.id)?.state === 'cancelled') ac.abort();
+      } catch { /* a transient DB error must not crash the process; next tick retries */ }
     };
     tick();
     const timer = setInterval(tick, deps.heartbeatMs ?? 15_000);
@@ -73,16 +86,12 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     try {
       out = await fn({
         logPath: join(sfHome(), 'logs', `${runId}.jsonl`), signal: ac.signal,
-        onPid: (p) => { pid = p; store.heartbeat(db, runId, p); },
+        onPid: (p) => { pid = p; tick(); },
       });
-    } catch (e) {
-      store.finishRun(db, runId, 'failed', { error: (e as Error).message });
-      throw e;
     } finally { clearInterval(timer); }
     tick(); // catch a cancel that landed after the last heartbeat
     if (ac.signal.aborted) {
       store.finishRun(db, runId, 'cancelled');
-      await onCancel();
       return null;
     }
     return { runId, out };
@@ -107,17 +116,24 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
   async function spec(t: Ticket, repo: Repo): Promise<void> {
     const wt = join(sfHome(), 'worktrees', repo.id, `${t.id}-spec`);
     const name = `sf-${repo.id}-${t.id}-spec`;
-    const clean = cleanup(repo, wt, name);
     try {
       await removeWorktree(repo.path, wt); // a crashed earlier spec run may have left one
       await addDetachedWorktree(repo.path, wt, repo.targetBranch);
-      await sb.create(name, [{ path: wt, ro: true }]);
-      const res = await withRun(t, 'spec', name, async () => {}, agent(name, 'spec', taskPrompt('spec', t, {})));
+      await create(name, [{ path: wt, ro: true }]);
+      const res = await withRun(t, 'spec', name, agent(name, 'spec', taskPrompt('spec', t, {})));
       if (!res || setback(t, res.runId, res.out)) return;
       const text = (res.out.text ?? '').trimEnd().split('\n').slice(0, -1).join('\n').trim(); // drop the contract line
+      if (!text) {
+        store.finishRun(db, res.runId, 'failed', { ...res.out, summary: 'spec run produced no spec text' });
+        retry(t, 'specifying', 'spec run produced no spec text', res.runId);
+        return;
+      }
       store.finishRun(db, res.runId, 'succeeded', res.out);
       store.transition(db, t.id, 'specifying', 'specified', ev(res.runId), { spec: text });
-    } finally { await clean(); }
+    } finally {
+      await sb.remove(name);
+      await removeWorktree(repo.path, wt);
+    }
   }
 
   async function prepare(t: Ticket, repo: Repo, profile: RepoProfile): Promise<void> {
@@ -126,10 +142,10 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     const branch = `sf/${t.id}`;
     const { baseSha } = await addWorktree(repo.path, wt, branch, repo.targetBranch);
     store.patchTicket(db, t.id, 'preparing', { worktreePath: wt, branch, baseSha });
-    await sb.create(name, [{ path: wt }]);
+    await create(name, [{ path: wt }]);
     const logPath = join(sfHome(), 'logs', `${t.id}-setup.log`);
     for (const cmd of profile.setup) {
-      const r = await sb.exec(name, cmd, { timeoutMs: TIMEOUTS.verify, logPath });
+      const r = await exec(name, cmd, { timeoutMs: TIMEOUTS.verify, logPath });
       if (r.code !== 0 || r.timedOut) throw new Error(`setup \`${cmd.join(' ')}\` ${r.timedOut ? 'timed out' : `exited ${r.code}`} (log: ${logPath})`);
     }
     if (deps.graphify) {
@@ -145,20 +161,19 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     const failureTail = prev?.state === 'failed' && prev.resultJson ? JSON.parse(prev.resultJson).failureTail : undefined;
     // partialWork (lost-run recovery) arrives with Task 9.
     const prompt = taskPrompt('build', t, { failureTail, partialWork: false, checks: profile.checks.map((c) => c.cmd.join(' ')) });
-    const res = await withRun(t, 'build', name, cleanup(repo, wt, name), agent(name, 'build', prompt));
+    const res = await withRun(t, 'build', name, agent(name, 'build', prompt));
     if (!res || setback(t, res.runId, res.out)) return;
     const head = (await commitAll(repo.path, wt, `${t.id}: ${t.title} (attempt ${t.attempt + 1})`)) ?? (await revParse(repo.path, `sf/${t.id}`));
     store.finishRun(db, res.runId, 'succeeded', res.out);
     store.transition(db, t.id, 'building', 'verifying', ev(res.runId), { headSha: head });
   }
 
-  async function verify(t: Ticket, repo: Repo, profile: RepoProfile): Promise<void> {
-    const { wt, name } = paths(t);
-    const res = await withRun(t, 'verify', name, cleanup(repo, wt, name), async (c) => {
+  async function verify(t: Ticket, profile: RepoProfile): Promise<void> {
+    const { name } = paths(t);
+    const res = await withRun(t, 'verify', name, async (c) => {
       for (const check of profile.checks) {
-        const before = sizeOf(c.logPath);
-        const r = await sb.exec(name, check.cmd, { timeoutMs: TIMEOUTS.verify, logPath: c.logPath, onPid: c.onPid, signal: c.signal });
-        if (r.code !== 0 || r.timedOut) return { check: check.name, code: r.code, timedOut: r.timedOut, failureTail: tail(readFrom(c.logPath, before)) };
+        const r = await exec(name, check.cmd, { timeoutMs: TIMEOUTS.verify, logPath: c.logPath, onPid: c.onPid, signal: c.signal });
+        if (r.code !== 0 || r.timedOut) return { check: check.name, code: r.code, timedOut: r.timedOut, failureTail: tail(readFrom(c.logPath, r.before)) };
       }
       return null;
     });
@@ -173,21 +188,24 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
   }
 
   async function review(t: Ticket, repo: Repo): Promise<void> {
-    const { wt, name } = paths(t);
+    const { wt } = paths(t);
+    const name = `sf-${repo.id}-${t.id}-review`;
     const prompt = taskPrompt('review', t, { diff: await diff(repo.path, t.baseSha!, t.headSha!) });
-    // shortcut: review reuses the build sandbox (worktree rw, not ro); its edits are never committed by review.
-    const res = await withRun(t, 'review', name, cleanup(repo, wt, name), agent(name, 'review', prompt));
-    if (!res || setback(t, res.runId, res.out)) return;
-    const findings = res.out.findings ?? [];
-    const blocking = findings.filter((f) => f.severity === 'blocking');
-    if (blocking.length) {
-      const failureTail = blocking.map((f) => `${f.file ? `${f.file}${f.line ? `:${f.line}` : ''}: ` : ''}${f.text}`).join('\n');
-      store.finishRun(db, res.runId, 'failed', { ...res.out, failureTail });
-      retry(t, 'building', `${blocking.length} blocking review finding(s)`, res.runId);
-      return;
-    }
-    store.finishRun(db, res.runId, 'succeeded', res.out);
-    store.transition(db, t.id, 'reviewing', 'awaiting_approval', ev(res.runId, { findings }));
+    try {
+      await create(name, [{ path: wt, ro: true }]);
+      const res = await withRun(t, 'review', name, agent(name, 'review', prompt));
+      if (!res || setback(t, res.runId, res.out)) return;
+      const findings = res.out.findings ?? [];
+      const blocking = findings.filter((f) => f.severity === 'blocking');
+      if (blocking.length) {
+        const failureTail = blocking.map((f) => `${f.file ? `${f.file}${f.line ? `:${f.line}` : ''}: ` : ''}${f.text}`).join('\n');
+        store.finishRun(db, res.runId, 'failed', { ...res.out, failureTail });
+        retry(t, 'building', `${blocking.length} blocking review finding(s)`, res.runId);
+        return;
+      }
+      store.finishRun(db, res.runId, 'succeeded', res.out);
+      store.transition(db, t.id, 'reviewing', 'awaiting_approval', ev(res.runId, { findings }));
+    } finally { await sb.remove(name); }
   }
 
   async function step(): Promise<'worked' | 'idle' | 'paused'> {
@@ -204,12 +222,21 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
       if (t.state === 'specifying') await spec(t, repo);
       else if (t.state === 'ready' || t.state === 'preparing') await prepare(t, repo, profile);
       else if (t.state === 'building') await build(t, repo, profile);
-      else if (t.state === 'verifying') await verify(t, repo, profile);
+      else if (t.state === 'verifying') await verify(t, profile);
       else if (t.state === 'reviewing') await review(t, repo);
     } catch (e) {
-      // infra failure (git, sandbox create, setup): park the ticket with the reason
+      // infra failure (git, sandbox, setup): never leave a run open (it would freeze the slot), park the ticket
+      const msg = (e as Error).message;
+      const open = store.activeRun(db);
+      if (open?.ticketId === t.id) store.finishRun(db, open.id, 'failed', { error: msg });
       const cur = store.getTicket(db, t.id)!;
-      if (canTransition(cur.state, 'blocked')) block(t.id, cur.state, `infra: ${(e as Error).message}`);
+      if (canTransition(cur.state, 'blocked')) block(t.id, cur.state, `infra: ${msg}`);
+    }
+    // Cancelled during this step (mid-run abort, or a lost CAS after the run): free its sandbox and worktree.
+    if (t.state !== 'specifying' && store.getTicket(db, t.id)?.state === 'cancelled') {
+      const { wt, name } = paths(store.getTicket(db, t.id)!);
+      await sb.remove(name);
+      await removeWorktree(repo.path, wt);
     }
     return 'worked';
   }
