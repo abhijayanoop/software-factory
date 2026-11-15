@@ -26,11 +26,22 @@ Environment: `sbx` v0.51.0 and Claude Code 2.1.325 on the host. The default `cla
   `/usage limit|rate limit/i`. Parse a reset time if the text has one. `src/fixtures/stream-rate-limited.jsonl` is hand-written
   from this shape (see the fixture's comment-free JSON).
 
-## Open: Node for TypeScript repos
+## Resolved (user-approved)
 
-The default image lacks Node, so TS repos can't run `npm ci` or checks. Proposed route:
-1. Install Node 24 once in a sandbox (`sudo` + NodeSource, an allowed host).
-2. `sbx template save` it as `sf-claude-node24`.
-3. `SbxSandbox.create` passes `-t sf-claude-node24` (the `--pull never` + template flow from `sbx template --help`).
+- **Node:** Node 24.22.3 was installed as root via NodeSource in a spike sandbox. Saved with
+  `sbx --no-input template save sf-spike sf-claude-node24` as `docker.io/library/sf-claude-node24:latest`.
+  It contains node 24, npm 11, uv 0.13.8, python 3.14 and claude.
+- **Context7:** `sbx mcp add context7 --url https://mcp.context7.com/mcp` is registered host-globally.
+  Verified in a fresh sandbox: the agent resolved `/reactjs/react.dev`.
 
-**Pending user OK**, because it installs packages as root.
+## Exact commands for `SbxSandbox` (Task 6)
+
+- **Create:**
+  `sbx --no-input create claude <worktreePath> [<extra>:ro …] --name <name> -t sf-claude-node24 --pull never --static-mcp context7`
+- **Exec agent:**
+  `sbx exec -i <name> claude -p --output-format stream-json --verbose --dangerously-skip-permissions [--append-system-prompt <text>]`
+  with the prompt on stdin.
+- **Exec checks:** `sbx exec <name> <argv…>`. The cwd is the workspace path, translated to POSIX.
+- **Remove:** `sbx rm --force <name>`. Plain `rm` prompts and fails without a tty.
+- Always pass `--no-input` on create and template commands; otherwise they prompt and fail without a tty.
+- No per-sandbox egress or auth commands are needed. Both come from global sbx config.
