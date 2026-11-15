@@ -111,3 +111,11 @@ export const events = (db: DatabaseSync, ticketId: string): Event[] =>
 
 export const eventsSince = (db: DatabaseSync, afterId: number): Event[] =>
   all<Event>(db, 'SELECT * FROM events WHERE id>? ORDER BY id', afterId);
+
+export function note(db: DatabaseSync, ticketId: string, data: unknown, runId?: number): void {
+  db.prepare("INSERT INTO events (ticket_id, run_id, type, actor, data_json, at) VALUES (?,?,'note','supervisor',?,?)")
+    .run(ticketId, runId ?? null, JSON.stringify(data), now());
+}
+
+export const latestRun = (db: DatabaseSync, ticketId: string, kinds: Run['kind'][]): Run | undefined =>
+  get<Run>(db, `SELECT * FROM runs WHERE ticket_id=? AND kind IN (${kinds.map(() => '?').join(',')}) ORDER BY id DESC LIMIT 1`, ticketId, ...kinds);

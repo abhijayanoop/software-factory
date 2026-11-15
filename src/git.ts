@@ -162,3 +162,8 @@ export async function removeWorktree(repoPath: string, wtPath: string): Promise<
 export async function currentBranch(repoPath: string): Promise<string> {
   return (await ok(['-C', repoPath, 'symbolic-ref', '--short', 'HEAD'])).trim();
 }
+
+export async function pathTracked(repoPath: string, ref: string, path: string): Promise<boolean> {
+  const common = await commonGitDir(repoPath);
+  return (await ok([`--git-dir=${common}`, 'ls-tree', '--name-only', ref, '--', path])).trim() !== '';
+}

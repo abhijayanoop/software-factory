@@ -3,7 +3,7 @@ import type { AgentResult, AgentRole, Finding } from './types.ts';
 import type { Sandbox } from './sandbox.ts';
 
 const MIN = 60_000;
-export const TIMEOUTS: Record<AgentRole, number> = { spec: 15 * MIN, review: 15 * MIN, build: 45 * MIN };
+export const TIMEOUTS: Record<AgentRole | 'verify', number> = { spec: 15 * MIN, review: 15 * MIN, build: 45 * MIN, verify: 15 * MIN };
 
 const err = (summary: string): AgentResult => ({ ok: false, kind: 'error', summary });
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -48,7 +48,7 @@ export function parseStream(jsonl: string): AgentResult {
   const findings = o.findings === undefined ? undefined : parseFindings(o.findings);
   if (findings === null) return err('final JSON has invalid findings');
   if (o.question !== undefined && typeof o.question !== 'string') return err('final JSON has invalid question');
-  const res: AgentResult = { ok: o.status === 'done', kind: o.status, summary: o.summary, costUsd };
+  const res: AgentResult = { ok: o.status === 'done', kind: o.status, summary: o.summary, costUsd, text };
   if (o.question !== undefined) res.question = o.question;
   if (findings) res.findings = findings;
   return res;

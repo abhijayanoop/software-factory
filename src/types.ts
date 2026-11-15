@@ -73,4 +73,5 @@ export interface AgentResult {
   findings?: Finding[];
   costUsd?: number;
   resetAt?: string;
+  text?: string; // full final result text (the spec run stores it minus the contract line)
 }

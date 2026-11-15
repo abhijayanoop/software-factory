@@ -71,3 +71,8 @@ test('runAgent returns error aborted when signal aborted, even with a done resul
   const r = await runAgent(sb, 'n', 'build', 'p', join(dir, 'l.jsonl'), { signal: ac.signal });
   assert.deepEqual(r, { ok: false, kind: 'error', summary: 'aborted' });
 });
+
+test('parseStream exposes the full final result text', () => {
+  const r = parseStream(res('# Spec\nbody\n{"status":"done","summary":"s"}'));
+  assert.equal(r.text, '# Spec\nbody\n{"status":"done","summary":"s"}');
+});
