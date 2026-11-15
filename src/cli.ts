@@ -149,7 +149,7 @@ const serve: Cmd = async (argv) => {
 
 const doctorCmd: Cmd = async (argv) => {
   const { v } = opts(argv, { fix: { type: 'boolean' } }, 0);
-  if (await runDoctor(db(), !!v.fix)) process.exitCode = 1;
+  if (await runDoctor(db(), !!v.fix)) fail('required tools missing');
 };
 
 const nested = (table: Record<string, Cmd>): Cmd => async (argv) => {
@@ -163,6 +163,7 @@ const commands: Record<string, Cmd> = {
   spec,
   ready,
   serve,
+  doctor: doctorCmd,
   approve: act({}, (d, id) => actions.approve(d, id)),
   reject: act({ note: { type: 'string' } }, (d, id, v) => actions.reject(d, id, v.note!)),
   answer: act({ text: { type: 'string' } }, (d, id, v) => actions.answer(d, id, v.text!)),
