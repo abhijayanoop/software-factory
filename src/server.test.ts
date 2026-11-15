@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Server } from 'node:http';
+import { request, type Server } from 'node:http';
 import { openDb } from './db.ts';
 import { addRepo, createTicket, getTicket, note } from './store.ts';
 import { FakeSandbox } from './sandbox.ts';
@@ -47,6 +47,24 @@ test('POST with foreign or missing Origin -> 403', async () => {
   assert.equal(getTicket(db, 'T-1')!.state, 'awaiting_approval');
 });
 
+test('lookalike and null Origin -> 403', async () => {
+  assert.equal((await post('/api/tickets/T-1/approve', { origin: `${base}.evil.com` })).status, 403);
+  assert.equal((await post('/api/tickets/T-1/approve', { origin: 'null' })).status, 403);
+});
+
+test('forged Host -> 403, normal GET 200 (DNS rebinding)', async () => {
+  const status = (host: string) => new Promise<number>((ok, bad) => {
+    request({ host: '127.0.0.1', port, path: '/api/tickets', headers: { Host: host } }, (r) => { r.resume(); ok(r.statusCode!); }).on('error', bad).end();
+  });
+  assert.equal(await status(`evil.com:${port}`), 403);
+  assert.equal(await status(`localhost:${port}`), 200);
+  assert.equal((await fetch(base + '/api/tickets')).status, 200);
+});
+
+test('offset beyond safe integer -> 400', async () => {
+  assert.equal((await fetch(base + '/api/runs/5/log?offset=99999999999999999999')).status, 400);
+});
+
 test('ids: malformed 400, unknown 404', async () => {
   assert.equal((await fetch(base + '/api/tickets/nope')).status, 400);
   assert.equal((await fetch(base + '/api/tickets/T-99')).status, 404);
@@ -78,8 +96,7 @@ test('run log from offset, missing file empty', async () => {
 test('static: file, SPA fallback, traversal refused', async () => {
   assert.equal(await (await fetch(base + '/')).text(), '<h1>hi</h1>');
   assert.equal(await (await fetch(base + '/some/route')).text(), '<h1>hi</h1>');
-  const raw = await fetch(base + '/..%2fsecret.txt');
-  assert.notEqual(await raw.text(), 'secret');
+  assert.equal((await fetch(base + '/..%2fsecret.txt')).status, 404);
 });
 
 test('SSE streams events', async () => {

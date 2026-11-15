@@ -130,7 +130,11 @@ const serve: Cmd = async (argv) => {
   const sb = new SbxSandbox();
   const step = createSupervisor({ db: d, sandbox: sb, ...(hasGraphify ? { graphify: async (wt: string) => { await run('graphify', ['update', wt]); } } : {}) }).step;
   const server = createServer(d, { port, webDist: fileURLToPath(new URL('../web/dist', import.meta.url)), sandbox: sb });
-  await new Promise<void>((ok, bad) => server.once('error', bad).listen(port, '127.0.0.1', ok));
+  await new Promise<void>((ok, bad) => {
+    server.once('error', bad);
+    server.listen(port, '127.0.0.1', () => { server.off('error', bad); ok(); });
+  });
+  server.on('error', (e) => console.error('sf serve: server error:', e));
   console.log(`sf serve: http://127.0.0.1:${(server.address() as { port: number }).port}`);
   while (!stopping) {
     try {

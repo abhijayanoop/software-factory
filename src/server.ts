@@ -53,13 +53,22 @@ export function createServer(db: DatabaseSync, opts: { port: number; webDist: st
     handle(req, res).catch((e) => {
       if (res.headersSent) return void res.end();
       const msg = e instanceof Error ? e.message : String(e);
-      if (e instanceof HttpError) json(res, e.status, { error: msg });
+      if (e instanceof HttpError) {
+        if (e.status === 413) res.setHeader('Connection', 'close');
+        json(res, e.status, { error: msg });
+      }
       else if (/illegal transition/.test(msg)) json(res, 409, { error: msg });
       else json(res, 500, { error: msg });
     });
   });
 
+  const allowedHosts = (): string[] => {
+    const port = (server.address() as { port: number } | null)?.port ?? opts.port;
+    return [`127.0.0.1:${port}`, `localhost:${port}`];
+  };
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!allowedHosts().includes(req.headers.host ?? '')) throw new HttpError(403, 'bad host'); // DNS-rebinding guard
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const path = url.pathname;
     if (!path.startsWith('/api/')) return serveStatic(req, res, path);
@@ -89,9 +98,8 @@ export function createServer(db: DatabaseSync, opts: { port: number; webDist: st
   async function mutate(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
     const m = /^\/api\/tickets\/([^/]+)\/(approve|reject|answer|retry|reset|cancel)$/.exec(path);
     if (!m) throw new HttpError(404, 'not found');
-    if (!(req.headers['content-type'] ?? '').startsWith('application/json')) throw new HttpError(415, 'Content-Type must be application/json');
-    const port = (server.address() as { port: number } | null)?.port ?? opts.port;
-    if (![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(req.headers.origin ?? '')) throw new HttpError(403, 'bad origin');
+    if ((req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase() !== 'application/json') throw new HttpError(415, 'Content-Type must be application/json');
+    if (!allowedHosts().map((h) => `http://${h}`).includes(req.headers.origin ?? '')) throw new HttpError(403, 'bad origin');
     const body = await readBody(req);
     const id = ticket(m[1]!).id;
     const sb = { db, sandbox: opts.sandbox };
@@ -110,8 +118,8 @@ export function createServer(db: DatabaseSync, opts: { port: number; webDist: st
 
   async function runLog(res: ServerResponse, rawId: string, rawOffset: string): Promise<void> {
     if (!/^\d+$/.test(rawId)) throw new HttpError(400, 'invalid run id');
-    if (!/^\d+$/.test(rawOffset)) throw new HttpError(400, 'invalid offset');
     const offset = Number(rawOffset);
+    if (!/^\d+$/.test(rawOffset) || !Number.isSafeInteger(offset)) throw new HttpError(400, 'invalid offset');
     let fh;
     try { fh = await open(join(sfHome(), 'logs', `${rawId}.jsonl`), 'r'); } catch { return json(res, 200, { text: '', offset }); }
     try {
@@ -128,11 +136,13 @@ export function createServer(db: DatabaseSync, opts: { port: number; webDist: st
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.flushHeaders();
     const tick = () => {
-      for (const e of store.eventsSince(db, cursor)) { res.write(`id: ${e.id}\ndata: ${JSON.stringify(e)}\n\n`); cursor = e.id; }
+      try {
+        for (const e of store.eventsSince(db, cursor)) { res.write(`id: ${e.id}\ndata: ${JSON.stringify(e)}\n\n`); cursor = e.id; }
+      } catch { clearInterval(timer); res.end(); }
     };
-    tick();
     const timer = setInterval(tick, 1000);
-    req.on('close', () => clearInterval(timer));
+    res.on('close', () => clearInterval(timer));
+    tick();
   }
 
   function serveStatic(req: IncomingMessage, res: ServerResponse, path: string): void {
