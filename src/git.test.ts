@@ -199,3 +199,9 @@ test('failing post-checkout hook does not run on addWorktree', async () => {
   await assert.rejects(access(join(repo, 'HOOK_RAN')));
   await rm(root, { recursive: true, force: true });
 });
+
+test('currentBranch returns checked-out branch', async () => {
+  const { root, repo } = await setup();
+  assert.equal(await g.currentBranch(repo), 'main');
+  await rm(root, { recursive: true, force: true });
+});

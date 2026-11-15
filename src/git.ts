@@ -158,3 +158,7 @@ export async function removeWorktree(repoPath: string, wtPath: string): Promise<
   await dropRegistration(repoPath, wtPath);
   await rm(wtPath, { recursive: true, force: true });
 }
+
+export async function currentBranch(repoPath: string): Promise<string> {
+  return (await ok(['-C', repoPath, 'symbolic-ref', '--short', 'HEAD'])).trim();
+}
