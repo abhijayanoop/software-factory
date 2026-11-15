@@ -122,3 +122,6 @@ export const latestRun = (db: DatabaseSync, ticketId: string, kinds: Run['kind']
 
 export const openRuns = (db: DatabaseSync): Run[] =>
   all<Run>(db, "SELECT * FROM runs WHERE state IN ('starting','running') ORDER BY id");
+
+export const listRuns = (db: DatabaseSync, ticketId: string): Run[] =>
+  all<Run>(db, 'SELECT * FROM runs WHERE ticket_id=? ORDER BY id', ticketId);

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from './db.ts';
-import { addRepo, getRepo, createTicket, getTicket, listTickets, transition, patchTicket, startRun, heartbeat, finishRun, activeRun, events, eventsSince } from './store.ts';
+import { addRepo, getRepo, createTicket, getTicket, listTickets, transition, patchTicket, startRun, heartbeat, finishRun, activeRun, events, eventsSince, listRuns } from './store.ts';
 
 const profile = { kind: 'ts' as const, setup: [], checks: [] };
 function setup() {
@@ -105,4 +105,12 @@ test('activeRun returns starting|running only', () => {
   assert.equal(activeRun(db)!.state, 'running');
   finishRun(db, r.id, 'succeeded', { ok: true });
   assert.equal(activeRun(db), undefined);
+});
+
+test('listRuns returns runs per ticket in order', () => {
+  const db = setup();
+  mk(db);
+  startRun(db, 'T-1', 'build'); startRun(db, 'T-1', 'verify');
+  assert.deepEqual(listRuns(db, 'T-1').map((r) => r.kind), ['build', 'verify']);
+  assert.deepEqual(listRuns(db, 'T-2'), []);
 });

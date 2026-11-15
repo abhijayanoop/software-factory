@@ -2,12 +2,16 @@
 import { parseArgs } from 'node:util';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openDb, sfHome } from './db.ts';
 import * as store from './store.ts';
 import * as git from './git.ts';
 import * as actions from './actions.ts';
 import { SbxSandbox } from './sandbox.ts';
+import { acquireLock, createServer } from './server.ts';
+import { createSupervisor, pidAlive, recover } from './supervisor.ts';
 import { detectProfile } from './profiles.ts';
 import { TRANSITIONS } from './states.ts';
 import type { RepoProfile, TicketState } from './types.ts';
@@ -109,6 +113,35 @@ const act = (options: Record<string, { type: 'string' }>, f: (d: Db, id: string,
   };
 const sandbox = () => new SbxSandbox();
 
+const run = promisify(execFile);
+
+const serve: Cmd = async (argv) => {
+  const { v } = opts(argv, { port: { type: 'string' } }, 0);
+  const port = Number(v.port ?? 4400);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) fail(`invalid port: ${v.port}`);
+  const d = db();
+  const release = acquireLock(join(sfHome(), 'serve.lock'));
+  let stopping = false;
+  const stop = () => { stopping = true; release(); process.exit(0); };
+  process.on('SIGINT', stop).on('SIGTERM', stop).on('exit', release);
+  recover(d, pidAlive);
+  const hasGraphify = await run(process.platform === 'win32' ? 'where' : 'which', ['graphify']).then(() => true, () => false);
+  if (!hasGraphify) console.warn('sf serve: graphify not found on PATH; graph updates disabled');
+  const sb = new SbxSandbox();
+  const step = createSupervisor({ db: d, sandbox: sb, ...(hasGraphify ? { graphify: async (wt: string) => { await run('graphify', ['update', wt]); } } : {}) }).step;
+  const server = createServer(d, { port, webDist: fileURLToPath(new URL('../web/dist', import.meta.url)), sandbox: sb });
+  await new Promise<void>((ok, bad) => server.once('error', bad).listen(port, '127.0.0.1', ok));
+  console.log(`sf serve: http://127.0.0.1:${(server.address() as { port: number }).port}`);
+  while (!stopping) {
+    try {
+      if ((await step()) !== 'worked') await new Promise((r) => setTimeout(r, 2000));
+    } catch (e) {
+      console.error('sf serve: step failed:', e);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+};
+
 const nested = (table: Record<string, Cmd>): Cmd => async (argv) => {
   const sub = table[argv[0] ?? ''] ?? fail(`unknown subcommand: ${argv[0] ?? ''}`);
   await sub(argv.slice(1));
@@ -119,6 +152,7 @@ const commands: Record<string, Cmd> = {
   ticket: nested({ add: ticketAdd, list: ticketList, show: ticketShow }),
   spec,
   ready,
+  serve,
   approve: act({}, (d, id) => actions.approve(d, id)),
   reject: act({ note: { type: 'string' } }, (d, id, v) => actions.reject(d, id, v.note!)),
   answer: act({ text: { type: 'string' } }, (d, id, v) => actions.answer(d, id, v.text!)),
