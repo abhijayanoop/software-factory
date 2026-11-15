@@ -22,6 +22,24 @@ async function setup() {
   return { root, repo, wt: join(root, 'home', 'worktrees', 'r', 'T-1') };
 }
 
+test('findTrailerCommit matches the exact trailer line only; deleteBranch tolerates missing, refuses checked out', async () => {
+  const { root, repo, wt } = await setup();
+  const base = sh(repo, 'rev-parse', 'HEAD');
+  sh(repo, 'commit', '--allow-empty', '-m', 'T-10: x\n\nFactory-Ticket: T-10');
+  assert.equal(await g.findTrailerCommit(repo, base, 'main', 'T-1'), null);
+  sh(repo, 'commit', '--allow-empty', '-m', 'T-1: y\n\nFactory-Ticket: T-1');
+  assert.equal(await g.findTrailerCommit(repo, base, 'main', 'T-1'), sh(repo, 'rev-parse', 'HEAD'));
+  assert.equal(await g.findTrailerCommit(repo, 'main', 'main', 'T-1'), null); // outside the range
+  await assert.rejects(g.findTrailerCommit(repo, base, 'main', 'T-1|.*'), /invalid ticket id/);
+  await g.deleteBranch(repo, 'sf/nope');
+  await g.addWorktree(repo, wt, 'sf/T-1', 'main');
+  await assert.rejects(g.deleteBranch(repo, 'sf/T-1'), /branch -D sf\/T-1 failed/);
+  await g.removeWorktree(repo, wt);
+  await g.deleteBranch(repo, 'sf/T-1');
+  assert.equal(sh(repo, 'branch', '--list', 'sf/T-1'), '');
+  await rm(root, { recursive: true, force: true });
+});
+
 test('addWorktree creates branch at base, idempotent', async () => {
   const { root, repo, wt } = await setup();
   const base = sh(repo, 'rev-parse', 'HEAD');

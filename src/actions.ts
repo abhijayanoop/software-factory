@@ -42,7 +42,9 @@ export function retry(db: DatabaseSync, id: string): boolean {
 async function cleanup(db: DatabaseSync, sb: Sandbox, t: Ticket): Promise<void> {
   const name = `sf-${t.repoId}-${t.id}`;
   for (const s of ['', '-review', '-spec', '-integrate']) await sb.remove(name + s); // remove is idempotent
-  await removeWorktree(store.getRepo(db, t.repoId)!.path, t.worktreePath ?? join(sfHome(), 'worktrees', t.repoId, t.id));
+  const repo = store.getRepo(db, t.repoId)!.path;
+  const dir = join(sfHome(), 'worktrees', t.repoId);
+  for (const wt of [t.worktreePath ?? join(dir, t.id), join(dir, `${t.id}-spec`), join(dir, `${t.id}-integrate`)]) await removeWorktree(repo, wt);
 }
 
 // Fresh start from the current target tip: drops the worktree, sandbox and sf/<id> branch, then -> ready.

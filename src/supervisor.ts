@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { sfHome } from './db.ts';
 import * as store from './store.ts';
 import { ACTIVE, canTransition } from './states.ts';
-import { addDetachedWorktree, addWorktree, advanceTarget, commitAll, commonGitDir, diff, mergeTree, pathTracked, removeWorktree, revParse, squashCommit } from './git.ts';
+import { addDetachedWorktree, addWorktree, advanceTarget, commitAll, commonGitDir, diff, findTrailerCommit, mergeTree, pathTracked, removeWorktree, revParse, squashCommit } from './git.ts';
 import type { ExecOpts, Sandbox } from './sandbox.ts';
 import { runAgent, TIMEOUTS } from './agent.ts';
 import { systemPrompt, taskPrompt } from './prompts.ts';
@@ -57,6 +57,16 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
       const r = await sb.exec(name, argv, o);
       if (r.code !== SBX_FAILED || o.signal?.aborted) return { ...r, before };
       if (i === 1) throw new Error(`sandbox exec \`${argv.join(' ')}\` failed (exit ${SBX_FAILED}) twice`);
+    }
+  }
+
+  // Runs every cleanup even if one fails; step must not reject (the serve loop calls it forever), so a
+  // failure becomes a note and sf doctor finds the leftovers.
+  async function tidy(id: string, ...fns: (() => Promise<void>)[]): Promise<void> {
+    for (const f of fns) {
+      try { await f(); } catch (e) {
+        try { store.note(db, id, { cleanupFailed: (e as Error).message }); } catch { console.error('cleanup failed', e); }
+      }
     }
   }
 
@@ -222,8 +232,7 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
       }
       return null;
     } finally {
-      await sb.remove(name);
-      await removeWorktree(repo.path, wt);
+      await tidy(t.id, () => sb.remove(name), () => removeWorktree(repo.path, wt));
     }
   }
 
@@ -231,8 +240,11 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     const approved = store.events(db, t.id).some((e) => e.type === 'approval' && JSON.parse(e.dataJson ?? '{}').headSha === t.headSha);
     if (!t.headSha || !approved) { block(t.id, 'integrating', 'approval stale'); return; }
     const { wt, name } = paths(t);
-    const res = await withRun(t, 'integrate', name, async (c): Promise<{ fail: string } | { sha: string; tip: string }> => {
+    const res = await withRun(t, 'integrate', name, async (c): Promise<{ fail: string } | { sha: string; tip: string; landed?: true }> => {
       const tip = await revParse(repo.path, repo.targetBranch);
+      // A crash after advanceTarget but before `done` re-runs this stage: never land the squash twice.
+      const landed = await findTrailerCommit(repo.path, t.baseSha!, tip, t.id);
+      if (landed) return { sha: landed, tip, landed: true };
       const m = await mergeTree(repo.path, tip, t.headSha!); // the approved commit, not whatever sf/<id> is now
       if ('conflict' in m) return { fail: `merge conflict: ${m.conflict.join(', ')}` };
       const sha = await squashCommit(repo.path, m.tree, tip, `${t.id}: ${t.title}\n\nFactory-Ticket: ${t.id}`);
@@ -241,17 +253,25 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     });
     if (!res) return;
     const out = res.out;
-    const adv = 'fail' in out ? out.fail : await advanceTarget(repo.path, repo.targetBranch, out.sha, out.tip);
-    if ('fail' in out || adv !== 'ok') {
-      const reason = adv === 'dirty' ? 'target branch checkout is dirty' : adv === 'moved' ? 'target branch moved' : adv;
+    const failed = (reason: string) => {
       store.finishRun(db, res.runId, 'failed', { reason });
       block(t.id, 'integrating', reason, res.runId);
-      return;
+    };
+    if ('fail' in out) return failed(out.fail);
+    if (!out.landed) {
+      if (store.getTicket(db, t.id)?.state !== 'integrating') { // cancelled after the run's last heartbeat
+        store.finishRun(db, res.runId, 'cancelled');
+        return;
+      }
+      const adv = await advanceTarget(repo.path, repo.targetBranch, out.sha, out.tip);
+      if (adv !== 'ok') return failed(adv === 'dirty' ? 'target branch checkout is dirty' : 'target branch moved');
     }
     store.finishRun(db, res.runId, 'succeeded', { squashSha: out.sha });
-    if (!store.transition(db, t.id, 'integrating', 'done', ev(res.runId, { squashSha: out.sha }))) return;
-    await sb.remove(name);
-    await removeWorktree(repo.path, wt); // the sf/<id> branch is kept
+    if (!store.transition(db, t.id, 'integrating', 'done', ev(res.runId, { squashSha: out.sha }))) {
+      store.note(db, t.id, { integratedDespiteCancel: out.sha }, res.runId); // cancel raced advanceTarget
+      return;
+    }
+    await tidy(t.id, () => sb.remove(name), () => removeWorktree(repo.path, wt)); // the sf/<id> branch is kept
   }
 
   async function step(): Promise<'worked' | 'idle' | 'paused'> {
@@ -281,13 +301,7 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     // Cancelled during this step (mid-run abort, or a lost CAS after the run): free its sandbox and worktree.
     if (t.state !== 'specifying' && store.getTicket(db, t.id)?.state === 'cancelled') {
       const { wt, name } = paths(store.getTicket(db, t.id)!);
-      try {
-        await sb.remove(name);
-        await removeWorktree(repo.path, wt);
-      } catch (e) {
-        // step must not reject (the serve loop calls it forever); sf doctor finds the leftovers
-        try { store.note(db, t.id, { cleanupFailed: (e as Error).message }); } catch { console.error('cancel cleanup failed', e); }
-      }
+      await tidy(t.id, () => sb.remove(name), () => removeWorktree(repo.path, wt));
     }
     return 'worked';
   }

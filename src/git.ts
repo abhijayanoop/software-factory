@@ -168,8 +168,17 @@ export async function pathTracked(repoPath: string, ref: string, path: string): 
   return (await ok([`--git-dir=${common}`, 'ls-tree', '--name-only', ref, '--', path])).trim() !== '';
 }
 
-// Drops a branch ref (no-op if missing). Used by reset, after its worktree is removed.
+// Drops a branch (no-op if missing). `branch -D` refuses a branch checked out in any worktree.
 export async function deleteBranch(repoPath: string, branch: string): Promise<void> {
   const common = await commonGitDir(repoPath);
-  await ok([`--git-dir=${common}`, 'update-ref', '-d', `refs/heads/${branch}`]);
+  const r = await run([`--git-dir=${common}`, 'branch', '-D', branch]);
+  if (r.code !== 0 && !/not found/i.test(r.stderr)) throw new Error(`git branch -D ${branch} failed (${r.code}): ${r.stderr.trim()}`);
+}
+
+// The commit in base..tip carrying the trailer line exactly `Factory-Ticket: <id>` (T-1 never matches T-10), if any.
+export async function findTrailerCommit(repoPath: string, base: string, tip: string, id: string): Promise<string | null> {
+  if (!/^T-\d+$/.test(id)) throw new Error(`invalid ticket id: ${id}`); // id goes into a regex
+  const common = await commonGitDir(repoPath);
+  const out = await ok([`--git-dir=${common}`, 'log', '--format=%H', `--grep=^Factory-Ticket: ${id}$`, `${base}..${tip}`]);
+  return out.split(/\r?\n/).find(Boolean) ?? null;
 }

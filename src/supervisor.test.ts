@@ -381,10 +381,42 @@ test('cancel during build kills run', async () => {
 });
 
 test('cancel with no active run cleans up itself', async () => {
-  const { db, wt, sb } = await toApproval();
+  const { db, repo, home, wt, sb } = await toApproval();
+  const leftover = join(home, 'worktrees', 'r', 'T-1-integrate'); // e.g. from a crashed integrate
+  sh(repo, 'worktree', 'add', '--detach', leftover, 'main');
   sb.removes.length = 0;
   assert.equal(await cancel({ db, sandbox: sb }, 'T-1'), true);
   assert.equal(getTicket(db, 'T-1')!.state, 'cancelled');
   assert.ok(sb.removes.includes('sf-r-T-1'));
   assert.ok(!existsSync(wt));
+  assert.ok(!existsSync(leftover));
+});
+
+test('integrate after a crash past advanceTarget finishes without a second squash', async () => {
+  const { db, repo, sup } = await toApproval();
+  approve(db, 'T-1');
+  assert.equal(await drive(sup), 'idle');
+  // the crash left the ticket in integrating after the squash landed; the user committed on top since
+  db.prepare("UPDATE tickets SET state='integrating' WHERE id='T-1'").run();
+  const tip = userCommit(repo, 'f1.txt', 'user edit on top\n'); // would conflict if re-merged
+  assert.equal(await drive(sup), 'idle');
+  assert.equal(getTicket(db, 'T-1')!.state, 'done');
+  assert.equal(sh(repo, 'rev-parse', 'main'), tip);
+  assert.equal(sh(repo, 'log', '--format=%H', '--grep=^Factory-Ticket: T-1$', 'main').split('\n').length, 1);
+  assert.deepEqual(db.prepare("SELECT state FROM runs WHERE kind='integrate'").all().map((r) => r.state), ['succeeded', 'succeeded']);
+});
+
+test('cancel during integrate recheck never advances the target', async () => {
+  let onCheck = (_n: number) => 0;
+  const { db, repo, home, sb, sup } = await toApproval({ check: (n) => onCheck(n) });
+  const moved = userCommit(repo, 'b.txt', 'b\n');
+  approve(db, 'T-1');
+  onCheck = () => { transition(db, 'T-1', 'integrating', 'cancelled', { type: 'transition', actor: 'human' }); return 0; };
+  assert.equal(await drive(sup), 'idle');
+  assert.equal(getTicket(db, 'T-1')!.state, 'cancelled');
+  assert.equal(sh(repo, 'rev-parse', 'main'), moved);
+  assert.equal(db.prepare("SELECT state FROM runs WHERE kind='integrate'").get()!.state, 'cancelled');
+  assert.ok(sb.removes.includes('sf-r-T-1-integrate'));
+  assert.ok(sb.removes.includes('sf-r-T-1'));
+  assert.ok(!existsSync(join(home, 'worktrees', 'r', 'T-1')));
 });
