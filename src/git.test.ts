@@ -31,7 +31,9 @@ test('findTrailerCommit matches the exact trailer line only; deleteBranch tolera
   assert.equal(await g.findTrailerCommit(repo, base, 'main', 'T-1'), sh(repo, 'rev-parse', 'HEAD'));
   assert.equal(await g.findTrailerCommit(repo, 'main', 'main', 'T-1'), null); // outside the range
   await assert.rejects(g.findTrailerCommit(repo, base, 'main', 'T-1|.*'), /invalid ticket id/);
-  await g.deleteBranch(repo, 'sf/nope');
+  const lc = process.env.LC_ALL;
+  process.env.LC_ALL = 'de_DE.UTF-8'; // a localized git must still match "not found"
+  try { await g.deleteBranch(repo, 'sf/nope'); } finally { if (lc === undefined) delete process.env.LC_ALL; else process.env.LC_ALL = lc; }
   await g.addWorktree(repo, wt, 'sf/T-1', 'main');
   await assert.rejects(g.deleteBranch(repo, 'sf/T-1'), /branch -D sf\/T-1 failed/);
   await g.removeWorktree(repo, wt);

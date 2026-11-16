@@ -13,7 +13,8 @@ async function run(args: string[], opts: { cwd?: string } = {}): Promise<Res> {
   // Repo hooks never run on any host git call (worktree add, update-ref, merge, commit...).
   const hooks = join(sfHome(), 'empty-hooks');
   await mkdir(hooks, { recursive: true });
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
+  // LC_ALL/LANG=C: English messages, so stderr matches like deleteBranch's "not found" work on any locale.
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))), LC_ALL: 'C', LANG: 'C' };
   try {
     const r = await exec('git', ['-c', `core.hooksPath=${hooks}`, ...args], {
       cwd: opts.cwd, shell: false, windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', env,
