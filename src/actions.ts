@@ -28,9 +28,12 @@ export function reject(db: DatabaseSync, id: string, note: string): boolean {
   return store.transition(db, id, 'awaiting_approval', 'ready', human('rejection', { note }), { attempt: 0, humanNote: note });
 }
 
+// A spec-blocked ticket goes back to specifying, so no build starts without a spec a human accepted.
+const restart = (t: Ticket): TicketState => (t.blockedFrom === 'specifying' ? 'specifying' : 'ready');
+
 export function answer(db: DatabaseSync, id: string, text: string): boolean {
-  get(db, id, 'blocked', 'ready');
-  return store.transition(db, id, 'blocked', 'ready', human('answer', { text }), { attempt: 0, humanNote: text });
+  const t = get(db, id, 'blocked', 'ready');
+  return store.transition(db, id, 'blocked', restart(t), human('answer', { text }), { attempt: 0, humanNote: text });
 }
 
 export function retry(db: DatabaseSync, id: string): boolean {
@@ -39,20 +42,24 @@ export function retry(db: DatabaseSync, id: string): boolean {
   return store.transition(db, id, 'blocked', t.blockedFrom, human('transition'), { attempt: 0 });
 }
 
-async function cleanup(db: DatabaseSync, sb: Sandbox, t: Ticket): Promise<void> {
+// Every removal is tried even if one fails; a failure becomes a note and sf doctor finds the leftovers.
+export async function cleanup(db: DatabaseSync, sb: Sandbox, t: Ticket): Promise<void> {
   const name = `sf-${t.repoId}-${t.id}`;
-  for (const s of ['', '-review', '-spec', '-integrate']) await sb.remove(name + s); // remove is idempotent
   const repo = store.getRepo(db, t.repoId)!.path;
   const dir = join(sfHome(), 'worktrees', t.repoId);
-  for (const wt of [t.worktreePath ?? join(dir, t.id), join(dir, `${t.id}-spec`), join(dir, `${t.id}-review`), join(dir, `${t.id}-integrate`)]) await removeWorktree(repo, wt);
+  const wts = [t.worktreePath ?? join(dir, t.id), join(dir, `${t.id}-spec`), join(dir, `${t.id}-review`), join(dir, `${t.id}-integrate`)];
+  for (const f of [...['', '-review', '-spec', '-integrate'].map((s) => () => sb.remove(name + s)), ...wts.map((wt) => () => removeWorktree(repo, wt))]) {
+    try { await f(); } catch (e) { store.note(db, t.id, { cleanupFailed: (e as Error).message }); }
+  }
 }
 
-// Fresh start from the current target tip: drops the worktree, sandbox and sf/<id> branch, then -> ready.
+// Fresh start from the current target tip: drops the worktree, sandbox and sf/<id> branch, then -> ready
+// (or -> specifying for a spec-blocked ticket).
 export async function reset({ db, sandbox }: Deps, id: string): Promise<boolean> {
   const t = get(db, id, 'blocked', 'ready');
   await cleanup(db, sandbox, t);
   await deleteBranch(store.getRepo(db, t.repoId)!.path, `sf/${t.id}`);
-  return store.transition(db, id, 'blocked', 'ready', human('transition', { reset: true }),
+  return store.transition(db, id, 'blocked', restart(t), human('transition', { reset: true }),
     { worktreePath: null, baseSha: null, headSha: null, attempt: 0 });
 }
 
@@ -61,10 +68,6 @@ export async function cancel({ db, sandbox }: Deps, id: string): Promise<boolean
   const t = get(db, id);
   if (!store.transition(db, id, t.state, 'cancelled', human('transition'))) return false;
   if (store.activeRun(db)?.ticketId === id) return true;
-  try {
-    await cleanup(db, sandbox, t);
-  } catch (e) {
-    store.note(db, id, { cleanupFailed: (e as Error).message }); // sf doctor finds the leftovers
-  }
+  await cleanup(db, sandbox, t);
   return true;
 }

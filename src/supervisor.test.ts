@@ -7,8 +7,8 @@ import { execFileSync } from 'node:child_process';
 import { openDb } from './db.ts';
 import { activeRun, addRepo, createTicket, events, getTicket, heartbeat, patchTicket, startRun, transition } from './store.ts';
 import { FakeSandbox } from './sandbox.ts';
-import { createSupervisor, recover } from './supervisor.ts';
-import { approve, cancel, reset } from './actions.ts';
+import { createSupervisor } from './supervisor.ts';
+import { answer, approve, cancel, reset } from './actions.ts';
 
 const sh = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', windowsHide: true }).trim();
 const result = (text: string, extra = {}) => JSON.stringify({ type: 'result', is_error: false, result: text, ...extra }) + '\n';
@@ -348,19 +348,17 @@ test('conflict -> blocked; reset rebuilds from the current target tip', async ()
   assert.equal(sh(repo, 'rev-list', '--count', 'main..sf/T-1'), '1');
 });
 
-test('recover marks dead-pid run lost and step redispatches with partialWork', async () => {
+test('a foreign run with a dead pid is marked lost (no kill) and step redispatches with partialWork', async () => {
   const { db, wt } = setup();
   const sb = fake(wt);
-  const sup = createSupervisor({ db, sandbox: sb });
+  const killed: number[] = [];
+  const sup = createSupervisor({ db, sandbox: sb, isAlive: () => false, kill: async (p) => { killed.push(p); } });
   await sup.step(); // ready -> building
   const run = startRun(db, 'T-1', 'build', 'sf-r-T-1');
   heartbeat(db, run.id, 424242);
-  assert.equal(await sup.step(), 'idle'); // slot held by the orphaned run
-  recover(db, () => true);
-  assert.equal(activeRun(db)?.id, run.id); // a live pid is left alone
-  recover(db, (pid) => pid !== 424242);
-  assert.equal(db.prepare('SELECT state FROM runs WHERE id=?').get(run.id)!.state, 'lost');
   assert.equal(await sup.step(), 'worked');
+  assert.deepEqual(killed, []);
+  assert.equal(db.prepare('SELECT state FROM runs WHERE id=?').get(run.id)!.state, 'lost');
   const build = sb.calls.find((c) => c.argv[0] === 'claude')!;
   assert.match(build.stdin!, /Partial work from an interrupted run/);
   assert.equal(getTicket(db, 'T-1')!.state, 'verifying');
@@ -421,4 +419,95 @@ test('cancel during integrate recheck never advances the target', async () => {
   assert.ok(sb.removes.includes('sf-r-T-1-integrate'));
   assert.ok(sb.removes.includes('sf-r-T-1'));
   assert.ok(!existsSync(join(home, 'worktrees', 'r', 'T-1')));
+});
+
+test('a run left by a dead serve (orphan pid still alive) is killed, lost and its build sandbox removed', async () => {
+  const { db, wt } = setup();
+  const sb = fake(wt);
+  const killed: number[] = [];
+  const sup = createSupervisor({ db, sandbox: sb, isAlive: (p) => p === 777 && !killed.includes(p), kill: async (p) => { killed.push(p); } });
+  await sup.step(); // ready -> building
+  const run = startRun(db, 'T-1', 'build', 'sf-r-T-1');
+  heartbeat(db, run.id, 777);
+  assert.equal(await sup.step(), 'worked');
+  assert.deepEqual(killed, [777]);
+  assert.equal(db.prepare('SELECT state FROM runs WHERE id=?').get(run.id)!.state, 'lost');
+  assert.equal(sb.removes[0], 'sf-r-T-1'); // removed before the re-dispatched build starts
+  assert.match(sb.calls.find((c) => c.argv[0] === 'claude')!.stdin!, /Partial work from an interrupted run/);
+  assert.equal(getTicket(db, 'T-1')!.state, 'verifying');
+});
+
+test('stop() aborts the current run as lost, not cancelled; the ticket keeps its state', async () => {
+  const { db } = setup();
+  const sb = new FakeSandbox((argv) => ({ code: 0, hang: argv[0] === 'claude' }));
+  const sup = createSupervisor({ db, sandbox: sb });
+  await sup.step(); // ready -> building
+  const p = sup.step();
+  setTimeout(() => sup.stop(), 20);
+  assert.equal(await p, 'worked');
+  assert.equal(db.prepare('SELECT state FROM runs').get()!.state, 'lost');
+  assert.equal(getTicket(db, 'T-1')!.state, 'building');
+  assert.deepEqual(sb.removes, ['sf-r-T-1']);
+});
+
+test('a graphify failure is noted and does not block the ticket', async () => {
+  const { db, wt } = setup();
+  const graphify = async () => { throw new Error('graphify exploded'); };
+  assert.equal(await drive(createSupervisor({ db, sandbox: fake(wt), graphify })), 'idle');
+  assert.equal(getTicket(db, 'T-1')!.state, 'awaiting_approval');
+  assert.ok(events(db, 'T-1').some((e) => e.type === 'note' && e.dataJson!.includes('graphify exploded')));
+});
+
+// A spec ticket blocked after 3 empty spec runs.
+async function specBlocked() {
+  const s = setup('specifying');
+  let good = false;
+  const sb = new FakeSandbox((argv) => ({ code: 0, stdout: argv[0] === 'claude' ? result(`${good ? '# Spec\n' : ''}{"status":"done","summary":"s"}`) : undefined }));
+  const sup = createSupervisor({ db: s.db, sandbox: sb });
+  assert.equal(await drive(sup), 'idle');
+  assert.equal(getTicket(s.db, 'T-1')!.blockedFrom, 'specifying');
+  return { ...s, sb, sup, fix: () => { good = true; } };
+}
+
+test('answer on a spec-blocked ticket goes back to specifying with the note', async () => {
+  const { db, sb, sup, fix } = await specBlocked();
+  assert.equal(answer(db, 'T-1', 'use sqlite'), true);
+  const t = getTicket(db, 'T-1')!;
+  assert.deepEqual([t.state, t.attempt, t.humanNote, t.spec], ['specifying', 0, 'use sqlite', null]);
+  fix();
+  assert.equal(await drive(sup), 'idle');
+  assert.equal(getTicket(db, 'T-1')!.state, 'specified');
+  assert.match(sb.calls.at(-1)!.stdin!, /HUMAN_NOTE[\s\S]*use sqlite/);
+});
+
+test('reset on a spec-blocked ticket goes back to specifying', async () => {
+  const { db, sb } = await specBlocked();
+  sb.removes.length = 0;
+  assert.equal(await reset({ db, sandbox: sb }, 'T-1'), true);
+  assert.deepEqual([getTicket(db, 'T-1')!.state, getTicket(db, 'T-1')!.attempt], ['specifying', 0]);
+  assert.ok(sb.removes.includes('sf-r-T-1-spec'));
+});
+
+test('one failing cleanup removal does not skip the rest', async () => {
+  const { db, wt, sb } = await toApproval();
+  sb.removes.length = 0;
+  const remove = sb.remove.bind(sb);
+  sb.remove = async (n) => { if (n === 'sf-r-T-1') throw new Error('sbx rm exploded'); await remove(n); };
+  assert.equal(await cancel({ db, sandbox: sb }, 'T-1'), true);
+  assert.deepEqual(sb.removes, ['sf-r-T-1-review', 'sf-r-T-1-spec', 'sf-r-T-1-integrate']);
+  assert.ok(!existsSync(wt));
+  assert.ok(events(db, 'T-1').some((e) => e.type === 'note' && e.dataJson!.includes('sbx rm exploded')));
+});
+
+test('a cancelled ticket whose run belonged to a dead serve is cleaned up when the run is reaped', async () => {
+  const { db, wt } = setup();
+  const sb = fake(wt);
+  const sup = createSupervisor({ db, sandbox: sb, isAlive: () => false });
+  await sup.step(); // ready -> building
+  heartbeat(db, startRun(db, 'T-1', 'build', 'sf-r-T-1').id, 777);
+  assert.equal(await cancel({ db, sandbox: sb }, 'T-1'), true);
+  assert.ok(existsSync(wt)); // deferred to the (dead) owner of the run
+  assert.equal(await sup.step(), 'idle');
+  assert.equal(activeRun(db), undefined);
+  assert.ok(!existsSync(wt));
 });

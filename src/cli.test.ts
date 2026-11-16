@@ -126,3 +126,26 @@ test('repo profile rejects malformed profile', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('spec --file replaces the spec of a specified ticket; show prints blocked reason and note', async () => {
+  const { root, repo, sf } = await setup();
+  try {
+    sf('repo', 'add', repo);
+    const id = sf('ticket', 'add', 'my-repo', '--title', 't', '--body', 'b').out.trim();
+    const f = join(root, 'spec.md');
+    await writeFile(f, '# one');
+    assert.equal(sf('spec', id, '--file', f).code, 0);
+    await writeFile(f, '# two');
+    const r = sf('spec', id, '--file', f);
+    assert.equal(r.code, 0, r.err);
+    const t = JSON.parse(sf('ticket', 'show', id, '--json').out);
+    assert.deepEqual([t.state, t.spec], ['specified', '# two']);
+    const h = new DatabaseSync(join(root, 'home', 'sf.db'));
+    assert.equal(h.prepare("SELECT COUNT(*) n FROM events WHERE ticket_id=? AND type='note'").get(id)!.n, 1);
+    h.prepare("UPDATE tickets SET state='blocked', blocked_from='building', blocked_reason='why?', human_note='hint' WHERE id=?").run(id);
+    h.close();
+    assert.match(sf('ticket', 'show', id).out, /blocked: why\?\nnote: hint/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

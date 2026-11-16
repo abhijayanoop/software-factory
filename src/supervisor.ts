@@ -6,8 +6,9 @@ import { sfHome } from './db.ts';
 import * as store from './store.ts';
 import { ACTIVE, canTransition } from './states.ts';
 import { addDetachedWorktree, addWorktree, advanceTarget, commitAll, commonGitDir, diff, findTrailerCommit, mergeTree, pathTracked, removeWorktree, revParse, squashCommit } from './git.ts';
-import type { ExecOpts, Sandbox } from './sandbox.ts';
+import { killPid, type ExecOpts, type Sandbox } from './sandbox.ts';
 import { runAgent, TIMEOUTS } from './agent.ts';
+import { cleanup } from './actions.ts';
 import { systemPrompt, taskPrompt } from './prompts.ts';
 import type { AgentResult, Repo, RepoProfile, Run, Ticket, TicketState } from './types.ts';
 
@@ -17,6 +18,8 @@ export type Deps = {
   graphify?: (wt: string) => Promise<void>;
   clock?: () => Date;
   heartbeatMs?: number;
+  isAlive?: (pid: number) => boolean;
+  kill?: (pid: number) => Promise<void>;
 };
 type RunCtx = { logPath: string; signal: AbortSignal; onPid: (pid: number) => void };
 
@@ -37,10 +40,13 @@ async function excludeGraphify(repoPath: string, ref: string): Promise<void> {
   appendFileSync(f, `${cur && !cur.endsWith('\n') ? '\n' : ''}graphify-out/\n`);
 }
 
-export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle' | 'paused'> } {
+export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle' | 'paused'>; stop(): void } {
   const { db, sandbox: sb } = deps;
   const clock = deps.clock ?? (() => new Date());
   let pausedUntil: Date | null = null;
+  let busy = false;
+  let stopped = false;
+  let current: AbortController | null = null;
 
   const ev = (runId?: number, data?: unknown) => ({ type: 'transition', actor: 'supervisor' as const, runId, data });
   const block = (id: string, from: TicketState, reason: string, runId?: number) =>
@@ -83,6 +89,8 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
   async function withRun<T>(t: Ticket, kind: Run['kind'], name: string, fn: (c: RunCtx) => Promise<T>): Promise<{ runId: number; out: T } | null> {
     const runId = store.startRun(db, t.id, kind, name).id;
     const ac = new AbortController();
+    current = ac;
+    if (stopped) ac.abort();
     let pid: number | undefined;
     const tick = () => {
       try {
@@ -98,10 +106,12 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
         logPath: join(sfHome(), 'logs', `${runId}.jsonl`), signal: ac.signal,
         onPid: (p) => { pid = p; tick(); },
       });
-    } finally { clearInterval(timer); }
+    } finally { clearInterval(timer); current = null; }
     tick(); // catch a cancel that landed after the last heartbeat
     if (ac.signal.aborted) {
-      store.finishRun(db, runId, 'cancelled');
+      // serve shutting down: the ticket keeps its state and the next serve re-dispatches it
+      if (stopped) await lose(db, sb, { id: runId, ticketId: t.id, kind, sandbox: name });
+      else store.finishRun(db, runId, 'cancelled');
       return null;
     }
     return { runId, out };
@@ -159,7 +169,7 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
       if (r.code !== 0 || r.timedOut) throw new Error(`setup \`${cmd.join(' ')}\` ${r.timedOut ? 'timed out' : `exited ${r.code}`} (log: ${logPath})`);
     }
     if (deps.graphify) {
-      await deps.graphify(wt);
+      try { await deps.graphify(wt); } catch (e) { store.note(db, t.id, { graphifyFailed: (e as Error).message }); } // the graph is optional
       await excludeGraphify(repo.path, baseSha);
     }
     store.transition(db, t.id, 'preparing', 'building', ev());
@@ -277,7 +287,17 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     await tidy(t.id, () => sb.remove(name), () => removeWorktree(repo.path, wt)); // the sf/<id> branch is kept
   }
 
+  // serve awaits step serially and holds the lock, so a run open at the start of a step belongs to a dead serve.
   async function step(): Promise<'worked' | 'idle' | 'paused'> {
+    if (busy) return 'idle';
+    busy = true;
+    try {
+      await recover(db, sb, deps.isAlive, deps.kill);
+      return await next();
+    } finally { busy = false; }
+  }
+
+  async function next(): Promise<'worked' | 'idle' | 'paused'> {
     if (pausedUntil && clock() < pausedUntil) return 'paused';
     pausedUntil = null;
     if (store.activeRun(db)) return 'idle';
@@ -309,13 +329,26 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     return 'worked';
   }
 
-  return { step };
+  return { step, stop: () => { stopped = true; current?.abort(); } };
 }
 
-// Startup recovery (spec §9): a starting/running run whose process is gone becomes `lost`; its ticket
-// keeps its state, so the next step re-dispatches it (a re-build gets partialWork).
-export function recover(db: DatabaseSync, isAlive: (pid: number) => boolean): void {
-  for (const r of store.openRuns(db)) if (r.pid === null || !isAlive(r.pid)) store.finishRun(db, r.id, 'lost');
+// A lost build's sandbox goes too, so a surviving in-sandbox claude cannot share the worktree with the
+// re-dispatched build; the worktree stays (partial work).
+async function lose(db: DatabaseSync, sb: Sandbox, r: Pick<Run, 'id' | 'ticketId' | 'kind' | 'sandbox'>): Promise<void> {
+  store.finishRun(db, r.id, 'lost');
+  if (r.kind !== 'build' || !r.sandbox) return;
+  try { await sb.remove(r.sandbox); } catch (e) { store.note(db, r.ticketId, { cleanupFailed: (e as Error).message }, r.id); }
+}
+
+// Recovery (spec §9): an open run of a dead serve is killed if its process survived and becomes `lost`; its
+// ticket keeps its state, so the next step re-dispatches it (a re-build gets partialWork).
+export async function recover(db: DatabaseSync, sb: Sandbox, isAlive = pidAlive, kill = killPid): Promise<void> {
+  for (const r of store.openRuns(db)) {
+    if (r.pid !== null && isAlive(r.pid)) await kill(r.pid);
+    await lose(db, sb, r);
+    const t = store.getTicket(db, r.ticketId);
+    if (t?.state === 'cancelled') await cleanup(db, sb, t); // sf cancel deferred its cleanup to the dead serve
+  }
 }
 
 export function pidAlive(pid: number): boolean {

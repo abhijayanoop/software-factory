@@ -11,7 +11,7 @@ import * as git from './git.ts';
 import * as actions from './actions.ts';
 import { SbxSandbox } from './sandbox.ts';
 import { acquireLock, createServer } from './server.ts';
-import { createSupervisor, pidAlive, recover } from './supervisor.ts';
+import { createSupervisor } from './supervisor.ts';
 import { doctor as runDoctor } from './doctor.ts';
 import { detectProfile } from './profiles.ts';
 import { TRANSITIONS } from './states.ts';
@@ -91,15 +91,20 @@ const ticketShow: Cmd = async (argv) => {
   const { v, p } = opts(argv, { json: { type: 'boolean' } }, 1);
   const t = ticketOf(db(), p[0]!);
   if (v.json) console.log(JSON.stringify(t, null, 2));
-  else console.log(`${t.id} [${t.state}] ${t.repoId}\n${t.title}\n\n${t.body}${t.spec ? `\n\n--- spec ---\n${t.spec}` : ''}`);
+  else console.log(`${t.id} [${t.state}] ${t.repoId}\n${t.title}${t.blockedReason ? `\nblocked: ${t.blockedReason}` : ''}`
+    + `${t.humanNote ? `\nnote: ${t.humanNote}` : ''}\n\n${t.body}${t.spec ? `\n\n--- spec ---\n${t.spec}` : ''}`);
 };
 
 const spec: Cmd = async (argv) => {
   const { v, p } = opts(argv, { file: { type: 'string' }, agent: { type: 'boolean' } }, 1);
   if (!v.file === !v.agent) fail('exactly one of --file / --agent required');
   const d = db();
-  if (v.agent) move(d, p[0]!, 'specifying', 'human');
-  else move(d, p[0]!, 'specified', 'human', { spec: readFileSync(v.file as string, 'utf8') });
+  if (v.agent) return move(d, p[0]!, 'specifying', 'human');
+  const text = readFileSync(v.file as string, 'utf8');
+  if (ticketOf(d, p[0]!).state !== 'specified') return move(d, p[0]!, 'specified', 'human', { spec: text });
+  // A specified ticket's spec is replaced in place (no state change).
+  if (!store.patchTicket(d, p[0]!, 'specified', { spec: text })) fail('ticket state changed, retry');
+  store.note(d, p[0]!, { specReplaced: true });
 };
 
 const ready: Cmd = async (argv) => move(db(), opts(argv, {}, 1).p[0]!, 'ready', 'human');
@@ -123,13 +128,23 @@ const serve: Cmd = async (argv) => {
   const d = db();
   const release = acquireLock(join(sfHome(), 'serve.lock'));
   let stopping = false;
-  const stop = () => { stopping = true; release(); process.exit(0); };
+  let stepping: Promise<unknown> = Promise.resolve();
+  let sup: ReturnType<typeof createSupervisor> | undefined;
+  // Abort the current run (killing its sandbox exec) and give the step a moment to finish before exiting.
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    sup?.stop();
+    await Promise.race([stepping, new Promise((r) => setTimeout(r, 10_000))]);
+    release();
+    process.exit(0);
+  };
   process.on('SIGINT', stop).on('SIGTERM', stop).on('exit', release);
-  recover(d, pidAlive);
   const hasGraphify = await run(process.platform === 'win32' ? 'where' : 'which', ['graphify']).then(() => true, () => false);
   if (!hasGraphify) console.warn('sf serve: graphify not found on PATH; graph updates disabled');
   const sb = new SbxSandbox();
-  const step = createSupervisor({ db: d, sandbox: sb, ...(hasGraphify ? { graphify: async (wt: string) => { await run('graphify', ['update', wt]); } } : {}) }).step;
+  sup = createSupervisor({ db: d, sandbox: sb, ...(hasGraphify ? { graphify: async (wt: string) => { await run('graphify', ['update', wt]); } } : {}) });
+  const step = sup.step;
   const server = createServer(d, { port, webDist: fileURLToPath(new URL('../web/dist', import.meta.url)), sandbox: sb });
   await new Promise<void>((ok, bad) => {
     server.once('error', bad);
@@ -139,7 +154,7 @@ const serve: Cmd = async (argv) => {
   console.log(`sf serve: http://127.0.0.1:${(server.address() as { port: number }).port}`);
   while (!stopping) {
     try {
-      if ((await step()) !== 'worked') await new Promise((r) => setTimeout(r, 2000));
+      if ((await (stepping = step())) !== 'worked') await new Promise((r) => setTimeout(r, 2000));
     } catch (e) {
       console.error('sf serve: step failed:', e);
       await new Promise((r) => setTimeout(r, 2000));

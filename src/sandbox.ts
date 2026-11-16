@@ -47,6 +47,17 @@ function killTree(pid: number, child: { kill(s: 'SIGKILL'): boolean }): void {
   else child.kill('SIGKILL');
 }
 
+// Kills an sbx exec orphaned by a dead serve. Pids get reused, so only a process that is still sbx is killed.
+export async function killPid(pid: number): Promise<void> {
+  const win = process.platform === 'win32';
+  const run = (cmd: string, args: string[]) => new Promise<string>((ok) =>
+    execFile(cmd, args, { shell: false, windowsHide: true }, (_e, out) => ok(String(out ?? ''))));
+  const image = await run(win ? 'tasklist' : 'ps', win ? ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'] : ['-p', String(pid), '-o', 'comm=']);
+  if (!/sbx/i.test(image)) return;
+  if (win) await run('taskkill', ['/PID', String(pid), '/T', '/F']);
+  else try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+}
+
 export class SbxSandbox implements Sandbox {
   async create(name: string, mounts: { path: string; ro?: boolean }[]): Promise<void> {
     const r = await sbx(buildSbxCreateArgs(name, mounts));
@@ -77,12 +88,22 @@ export class SbxSandbox implements Sandbox {
     return new Promise<{ code: number; timedOut: boolean }>((resolve) => {
       let timedOut = false;
       let aborted = false;
-      const kill = () => { if (child.pid !== undefined) killTree(child.pid, child); };
+      let settled = false;
+      let backstop: NodeJS.Timeout | undefined;
+      const kill = () => {
+        if (child.pid !== undefined) killTree(child.pid, child);
+        backstop ??= setTimeout(() => done(1), 30_000); // a killed child whose 'close' never arrives must not hang the run
+      };
       const timer = setTimeout(() => { timedOut = true; kill(); }, o.timeoutMs);
       const onAbort = () => { aborted = true; kill(); };
       if (o.signal?.aborted) onAbort(); else o.signal?.addEventListener('abort', onAbort, { once: true });
       const done = (code: number) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        clearTimeout(backstop);
+        child.stdout.unpipe(log);
+        child.stderr.unpipe(log);
         o.signal?.removeEventListener('abort', onAbort);
         log.end(() => resolve({ code: aborted && code === 0 ? 1 : code, timedOut }));
       };
