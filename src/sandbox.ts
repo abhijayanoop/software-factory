@@ -1,5 +1,5 @@
 import { spawn, execFile } from 'node:child_process';
-import { createWriteStream, mkdirSync, appendFileSync } from 'node:fs';
+import { createWriteStream, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export interface ExecOpts {
@@ -23,6 +23,12 @@ export function buildSbxCreateArgs(name: string, mounts: { path: string; ro?: bo
 
 export function buildSbxExecArgs(name: string, argv: string[], interactive: boolean): string[] {
   return ['exec', ...(interactive ? ['-i'] : []), name, ...argv];
+}
+
+// See src/sandbox-prep.py: the Windows-host workspace mount has no symlinks and shows every file as executable.
+const PREP = readFileSync(new URL('./sandbox-prep.py', import.meta.url), 'utf8');
+export function buildSbxPrepArgs(name: string): string[] {
+  return ['exec', '-u', 'root', name, 'python3', '-c', PREP, 'node_modules', '.venv'];
 }
 
 function sbx(args: string[]): Promise<{ code: number; out: string }> {
@@ -51,8 +57,14 @@ export class SbxSandbox implements Sandbox {
     if (r.code !== 0 && r.code !== 125 && !/not found/i.test(r.out)) throw new Error(`sbx rm failed (${r.code}): ${r.out.trim()}`);
   }
 
-  exec(name: string, argv: string[], o: ExecOpts): Promise<{ code: number; timedOut: boolean }> {
+  async exec(name: string, argv: string[], o: ExecOpts): Promise<{ code: number; timedOut: boolean }> {
     mkdirSync(dirname(o.logPath), { recursive: true });
+    const prep = await sbx(buildSbxPrepArgs(name));
+    if (prep.code !== 0) {
+      appendFileSync(o.logPath, `sf: sandbox prep failed (${prep.code}): ${prep.out}
+`);
+      return { code: 125, timedOut: false }; // infra failure: the supervisor retries once, then blocks
+    }
     const log = createWriteStream(o.logPath, { flags: 'a' });
     const child = spawn('sbx', buildSbxExecArgs(name, argv, o.stdin !== undefined), { shell: false, windowsHide: true });
     if (child.pid !== undefined) o.onPid?.(child.pid);
@@ -60,7 +72,7 @@ export class SbxSandbox implements Sandbox {
     child.stderr.pipe(log, { end: false });
     child.stdin.on('error', () => {});
     child.stdin.end(o.stdin);
-    return new Promise((resolve) => {
+    return new Promise<{ code: number; timedOut: boolean }>((resolve) => {
       let timedOut = false;
       let aborted = false;
       const kill = () => { if (child.pid !== undefined) killTree(child.pid, child); };

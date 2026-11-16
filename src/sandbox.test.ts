@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSbxCreateArgs, buildSbxExecArgs, FakeSandbox } from './sandbox.ts';
+import { buildSbxCreateArgs, buildSbxExecArgs, buildSbxPrepArgs, FakeSandbox } from './sandbox.ts';
 
 test('buildSbxCreateArgs maps ro mounts to PATH:ro and adds --static-mcp context7', () => {
   const a = buildSbxCreateArgs('sf-r-T-1', [{ path: 'C:/w' }, { path: 'C:/git', ro: true }]);
@@ -14,6 +14,13 @@ test('buildSbxCreateArgs rejects a read-only primary workspace (sbx refuses it)'
 
 test('FakeSandbox.create enforces the same mount rules as sbx', async () => {
   await assert.rejects(new FakeSandbox().create('n', [{ path: 'p', ro: true }]), /primary workspace/);
+});
+
+test('buildSbxPrepArgs runs the prep script as root for node_modules and .venv', () => {
+  const a = buildSbxPrepArgs('n');
+  assert.deepEqual(a.slice(0, 6), ['exec', '-u', 'root', 'n', 'python3', '-c']);
+  assert.match(a[6]!, /MS_BIND/);
+  assert.deepEqual(a.slice(7), ['node_modules', '.venv']);
 });
 
 test('buildSbxExecArgs keeps prompt off argv', () => {
