@@ -1,6 +1,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { createWriteStream, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { TIMEOUTS } from './agent.ts';
 
 export interface ExecOpts {
   stdin?: string;
@@ -27,13 +28,14 @@ export function buildSbxExecArgs(name: string, argv: string[], interactive: bool
 
 // See src/sandbox-prep.py: the Windows-host workspace mount has no symlinks and shows every file as executable.
 const PREP = readFileSync(new URL('./sandbox-prep.py', import.meta.url), 'utf8');
-export function buildSbxPrepArgs(name: string): string[] {
-  return ['exec', '-u', 'root', name, 'python3', '-c', PREP, 'node_modules', '.venv'];
+// -I: isolated mode, so a worker-planted module in the workspace (cwd) is never imported as root.
+export function buildSbxPrepArgs(name: string, windowsHost = process.platform === 'win32'): string[] {
+  return ['exec', '-u', 'root', name, 'python3', '-I', '-c', PREP, ...(windowsHost ? ['--chmod'] : []), 'node_modules', '.venv'];
 }
 
-function sbx(args: string[]): Promise<{ code: number; out: string }> {
+function sbx(args: string[], o: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    execFile('sbx', args, { shell: false, windowsHide: true }, (err, stdout, stderr) => {
+    execFile('sbx', args, { shell: false, windowsHide: true, timeout: o.timeoutMs, signal: o.signal }, (err, stdout, stderr) => {
       const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
       resolve({ code, out: `${stdout}${stderr}${err && typeof err.code !== 'number' ? String(err.message) : ''}` });
     });
@@ -59,7 +61,7 @@ export class SbxSandbox implements Sandbox {
 
   async exec(name: string, argv: string[], o: ExecOpts): Promise<{ code: number; timedOut: boolean }> {
     mkdirSync(dirname(o.logPath), { recursive: true });
-    const prep = await sbx(buildSbxPrepArgs(name));
+    const prep = await sbx(buildSbxPrepArgs(name), { timeoutMs: TIMEOUTS.verify, signal: o.signal });
     if (prep.code !== 0) {
       appendFileSync(o.logPath, `sf: sandbox prep failed (${prep.code}): ${prep.out}
 `);

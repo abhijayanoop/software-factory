@@ -16,11 +16,12 @@ test('FakeSandbox.create enforces the same mount rules as sbx', async () => {
   await assert.rejects(new FakeSandbox().create('n', [{ path: 'p', ro: true }]), /primary workspace/);
 });
 
-test('buildSbxPrepArgs runs the prep script as root for node_modules and .venv', () => {
-  const a = buildSbxPrepArgs('n');
-  assert.deepEqual(a.slice(0, 6), ['exec', '-u', 'root', 'n', 'python3', '-c']);
-  assert.match(a[6]!, /MS_BIND/);
-  assert.deepEqual(a.slice(7), ['node_modules', '.venv']);
+test('buildSbxPrepArgs runs the prep script as root in isolated mode; chmod pass only for a Windows host', () => {
+  const a = buildSbxPrepArgs('n', true);
+  assert.deepEqual(a.slice(0, 7), ['exec', '-u', 'root', 'n', 'python3', '-I', '-c']);
+  assert.match(a[7]!, /MS_BIND/);
+  assert.deepEqual(a.slice(8), ['--chmod', 'node_modules', '.venv']);
+  assert.deepEqual(buildSbxPrepArgs('n', false).slice(8), ['node_modules', '.venv']);
 });
 
 test('buildSbxExecArgs keeps prompt off argv', () => {
