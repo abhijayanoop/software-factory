@@ -43,13 +43,15 @@ Auth: the workers use your Claude subscription through the sbx secret store (`sb
 ```sh
 sf repo add <path>                       # prints the detected profile; confirm or fix with `sf repo profile`
 sf ticket add <repoId> --title "..." --body "..."
-sf spec T-1 --agent                      # or --file spec.md
+sf serve                                 # in its own terminal; prints http://127.0.0.1:4400
+sf spec T-1 --agent                      # or --file spec.md; the agent spec runs under sf serve
+sf ticket show T-1                       # wait for `specified`, read the spec (replace it with --file if needed)
 sf ready T-1
-sf serve                                 # prints http://127.0.0.1:4400
 sf approve T-1                           # or approve/reject in the dashboard
 ```
 
 Other commands: `ticket list|show`, `reject`, `answer`, `retry`, `reset`, `cancel`, `doctor --fix`.
+Stop `sf serve` before `sf doctor --fix`, or it may remove the worktree and sandbox of a running ticket.
 Claude Code users can copy `skill/SKILL.md` into `~/.claude/skills/sf/` to drive all of this through `/sf`.
 
 ## Safety model

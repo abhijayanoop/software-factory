@@ -9,13 +9,13 @@ Run commands as `sf <cmd>` if linked, otherwise `node <factory-repo>/src/cli.ts 
 
 ## Commands
 
-- `sf doctor [--fix]`: check tools and clean orphan worktrees and sandboxes. Run this first when something looks broken.
+- `sf doctor [--fix]`: check tools and clean orphan worktrees and sandboxes. Run this first when something looks broken. Stop `sf serve` before `--fix`.
 - `sf repo add <path> [--id <id>] [--target <branch>]`: register a repo. It prints the detected profile (setup and check commands).
 - `sf repo profile <repoId> --file <profile.json>`: replace the profile after the user corrects it.
 - `sf ticket add <repoId> --title "..." (--body "..." | --body-file <f>)`: prints the new ticket id.
 - `sf ticket list [--state <s>]`, `sf ticket show <id> [--json]`: read status.
-- `sf spec <id> --agent`: have the factory write the spec. `sf spec <id> --file <spec.md>`: use a spec you wrote.
-- `sf ready <id>`: queue a specified ticket for the build.
+- `sf spec <id> --agent`: have the factory write the spec; it runs only while `sf serve` is running. `sf spec <id> --file <spec.md>`: use a spec you wrote (also replaces the spec of a `specified` ticket).
+- `sf ready <id>`: queue a ticket for the build once it is `specified`.
 - `sf serve [--port 4400]`: run the supervisor and dashboard. It runs until stopped.
 - `sf approve <id>`, `sf reject <id> --note "..."`, `sf answer <id> --text "..."`, `sf retry <id>`, `sf reset <id>`, `sf cancel <id>`.
 
@@ -28,7 +28,7 @@ Run commands as `sf <cmd>` if linked, otherwise `node <factory-repo>/src/cli.ts 
 
 ## Starting the server
 
-Start `sf serve` in the background (for example with `run_in_background`). Read its first output line, `sf serve: http://127.0.0.1:<port>`, and give that URL to the user. Approvals and reviews happen on the dashboard there. Only one `sf serve` can run at a time; a second one fails on the lock.
+Start `sf serve` in the background (for example with `run_in_background`). Read its first output line, `sf serve: http://127.0.0.1:<port>`, and give that URL to the user. Approvals and reviews happen on the dashboard there. Only one `sf serve` can run at a time; a second one fails on the lock. Start it before `sf spec --agent`, then run `sf ready` after the ticket reaches `specified` and the user has seen the spec.
 
 ## Status
 
