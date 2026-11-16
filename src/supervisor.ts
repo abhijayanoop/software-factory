@@ -129,7 +129,7 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
     try {
       await removeWorktree(repo.path, wt); // a crashed earlier spec run may have left one
       await addDetachedWorktree(repo.path, wt, repo.targetBranch);
-      await create(name, [{ path: wt, ro: true }]);
+      await create(name, [{ path: wt }]); // throwaway checkout: sbx needs a rw primary workspace
       const res = await withRun(t, 'spec', name, agent(name, 'spec', taskPrompt('spec', t, {})));
       if (!res || setback(t, res.runId, res.out)) return;
       const text = (res.out.text ?? '').trimEnd().split('\n').slice(0, -1).join('\n').trim(); // drop the contract line
@@ -198,11 +198,14 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
   }
 
   async function review(t: Ticket, repo: Repo): Promise<void> {
-    const { wt } = paths(t);
+    // A throwaway checkout of the head: sbx needs a rw primary workspace, and the reviewer must not touch the build worktree.
+    const wt = join(sfHome(), 'worktrees', repo.id, `${t.id}-review`);
     const name = `sf-${repo.id}-${t.id}-review`;
     const prompt = taskPrompt('review', t, { diff: await diff(repo.path, t.baseSha!, t.headSha!) });
     try {
-      await create(name, [{ path: wt, ro: true }]);
+      await removeWorktree(repo.path, wt); // a crashed earlier review may have left one
+      await addDetachedWorktree(repo.path, wt, t.headSha!);
+      await create(name, [{ path: wt }]);
       const res = await withRun(t, 'review', name, agent(name, 'review', prompt));
       if (!res || setback(t, res.runId, res.out)) return;
       const findings = res.out.findings ?? [];
@@ -215,7 +218,7 @@ export function createSupervisor(deps: Deps): { step(): Promise<'worked' | 'idle
       }
       store.finishRun(db, res.runId, 'succeeded', res.out);
       store.transition(db, t.id, 'reviewing', 'awaiting_approval', ev(res.runId, { findings }));
-    } finally { await sb.remove(name); }
+    } finally { await tidy(t.id, () => sb.remove(name), () => removeWorktree(repo.path, wt)); }
   }
 
   // Profile setup + checks on the squash commit in a throwaway checkout; returns the failure, or null.

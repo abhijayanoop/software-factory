@@ -16,6 +16,7 @@ export interface Sandbox {
 }
 
 export function buildSbxCreateArgs(name: string, mounts: { path: string; ro?: boolean }[]): string[] {
+  if (mounts[0]?.ro) throw new Error('primary workspace must be read/write (sbx refuses a :ro first mount)');
   const m = mounts.map((x) => (x.ro ? `${x.path}:ro` : x.path));
   return ['--no-input', 'create', 'claude', ...m, '--name', name, '-t', 'sf-claude-node24', '--pull', 'never', '--static-mcp', 'context7'];
 }
@@ -86,7 +87,10 @@ export class FakeSandbox implements Sandbox {
   script: FakeScript;
   constructor(script: FakeScript = () => ({ code: 0 })) { this.script = script; }
 
-  async create(name: string, mounts: { path: string; ro?: boolean }[]): Promise<void> { this.creates.push({ name, mounts }); }
+  async create(name: string, mounts: { path: string; ro?: boolean }[]): Promise<void> {
+    buildSbxCreateArgs(name, mounts); // same mount validation as the real sbx
+    this.creates.push({ name, mounts });
+  }
   async remove(name: string): Promise<void> { this.removes.push(name); }
 
   exec(name: string, argv: string[], o: ExecOpts): Promise<{ code: number; timedOut: boolean }> {

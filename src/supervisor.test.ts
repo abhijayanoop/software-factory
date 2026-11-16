@@ -62,7 +62,7 @@ async function drive(sup: { step(): Promise<string> }) {
 const runKinds = (db: ReturnType<typeof openDb>) => db.prepare('SELECT kind FROM runs ORDER BY id').all().map((x) => x.kind);
 
 test('happy path reaches awaiting_approval', async () => {
-  const { db, repo, wt } = setup();
+  const { db, repo, wt, home } = setup();
   const sb = fake(wt);
   const graphify = async (p: string) => { mkdirSync(join(p, 'graphify-out')); writeFileSync(join(p, 'graphify-out', 'g.json'), '{}'); };
   assert.equal(await drive(createSupervisor({ db, sandbox: sb, graphify })), 'idle');
@@ -74,10 +74,12 @@ test('happy path reaches awaiting_approval', async () => {
   assert.deepEqual(runKinds(db), ['build', 'verify', 'review']);
   assert.deepEqual(sb.calls.map((c) => c.argv[0]), ['setup', 'claude', 'check', 'claude']);
   assert.equal(sb.creates[0].mounts[0].ro, undefined);
-  // review runs in its own sandbox with the worktree read-only, removed afterwards
-  assert.deepEqual(sb.creates[1], { name: 'sf-r-T-1-review', mounts: [{ path: t.worktreePath, ro: true }] });
+  // review runs in its own sandbox on a throwaway checkout of the head (sbx needs a rw primary), removed afterwards
+  const reviewWt = join(home, 'worktrees', 'r', 'T-1-review');
+  assert.deepEqual(sb.creates[1], { name: 'sf-r-T-1-review', mounts: [{ path: reviewWt }] });
   assert.equal(sb.calls[3].name, 'sf-r-T-1-review');
   assert.deepEqual(sb.removes, ['sf-r-T-1-review']);
+  assert.ok(!existsSync(reviewWt));
   // graphify output is excluded, never committed
   assert.ok(!sh(repo, 'show', '--name-only', '--format=', 'sf/T-1').includes('graphify-out'));
   assert.match(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^graphify-out\/$/m);
@@ -161,7 +163,7 @@ test('spec run stores the final message minus the contract line', async () => {
   const t = getTicket(db, 'T-1')!;
   assert.equal(t.state, 'specified');
   assert.equal(t.spec, '# Spec\n- [ ] works');
-  assert.deepEqual(sb.creates[0], { name: 'sf-r-T-1-spec', mounts: [{ path: join(home, 'worktrees', 'r', 'T-1-spec'), ro: true }] });
+  assert.deepEqual(sb.creates[0], { name: 'sf-r-T-1-spec', mounts: [{ path: join(home, 'worktrees', 'r', 'T-1-spec') }] });
   assert.deepEqual(sb.removes, ['sf-r-T-1-spec']);
   assert.ok(!existsSync(join(home, 'worktrees', 'r', 'T-1-spec')));
   assert.deepEqual(runKinds(db), ['spec']);

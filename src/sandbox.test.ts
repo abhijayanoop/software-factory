@@ -6,7 +6,14 @@ test('buildSbxCreateArgs maps ro mounts to PATH:ro and adds --static-mcp context
   const a = buildSbxCreateArgs('sf-r-T-1', [{ path: 'C:/w' }, { path: 'C:/git', ro: true }]);
   assert.deepEqual(a, ['--no-input', 'create', 'claude', 'C:/w', 'C:/git:ro', '--name', 'sf-r-T-1',
     '-t', 'sf-claude-node24', '--pull', 'never', '--static-mcp', 'context7']);
-  assert.equal(buildSbxCreateArgs('n', [{ path: 'p', ro: true }])[3], 'p:ro');
+});
+
+test('buildSbxCreateArgs rejects a read-only primary workspace (sbx refuses it)', () => {
+  assert.throws(() => buildSbxCreateArgs('n', [{ path: 'p', ro: true }]), /primary workspace must be read\/write/);
+});
+
+test('FakeSandbox.create enforces the same mount rules as sbx', async () => {
+  await assert.rejects(new FakeSandbox().create('n', [{ path: 'p', ro: true }]), /primary workspace/);
 });
 
 test('buildSbxExecArgs keeps prompt off argv', () => {
