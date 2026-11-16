@@ -56,6 +56,11 @@ const repoAdd: Cmd = async (argv) => {
   console.log(JSON.stringify(profile, null, 2));
 };
 
+const repoList: Cmd = async (argv) => {
+  opts(argv, {}, 0);
+  for (const r of store.listRepos(db())) console.log(`${r.id}	${r.path}	${r.targetBranch}`);
+};
+
 const repoProfile: Cmd = async (argv) => {
   const { v, p } = opts(argv, { file: { type: 'string' } }, 1);
   if (!v.file) fail('--file required');
@@ -173,7 +178,7 @@ const nested = (table: Record<string, Cmd>): Cmd => async (argv) => {
 };
 
 const commands: Record<string, Cmd> = {
-  repo: nested({ add: repoAdd, profile: repoProfile }),
+  repo: nested({ add: repoAdd, list: repoList, profile: repoProfile }),
   ticket: nested({ add: ticketAdd, list: ticketList, show: ticketShow }),
   spec,
   ready,

@@ -50,9 +50,16 @@ sf ready T-1
 sf approve T-1                           # or approve/reject in the dashboard
 ```
 
-Other commands: `ticket list|show`, `reject`, `answer`, `retry`, `reset`, `cancel`, `doctor --fix`.
+Other commands: `repo list`, `ticket list|show`, `reject`, `answer`, `retry`, `reset`, `cancel`, `doctor --fix`.
 Stop `sf serve` before `sf doctor --fix`, or it may remove the worktree and sandbox of a running ticket.
-Claude Code users can copy `skill/SKILL.md` into `~/.claude/skills/sf/` to drive all of this through `/sf`.
+Claude Code users can drive all of this through `/sf` from inside any repo: it registers the repo, starts `sf serve` if needed and runs the ticket flow from the conversation. Install it by linking the skill folder (a junction keeps it in sync with this repo):
+
+```powershell
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\sf" -Target "$PWD\skill"   # Windows
+```
+```sh
+ln -s "$PWD/skill" ~/.claude/skills/sf   # macOS / Linux
+```
 
 ## Safety model
 

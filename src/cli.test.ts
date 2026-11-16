@@ -30,6 +30,7 @@ test('repo add -> ticket add -> spec --file -> ready', async () => {
   const { root, repo, sf } = await setup();
   try {
     const add = sf('repo', 'add', repo);
+    assert.match(sf('repo', 'list').out, /^my-repo	.*My Repo	/);
     assert.equal(add.code, 0, add.err);
     assert.equal(JSON.parse(add.out).kind, 'ts');
     const t = sf('ticket', 'add', 'my-repo', '--title', 'Do it', '--body', 'body');

@@ -20,6 +20,8 @@ export function setProfile(db: DatabaseSync, id: string, profile: RepoProfile): 
   db.prepare('UPDATE repos SET profile_json=? WHERE id=?').run(JSON.stringify(profile), id);
 }
 
+export const listRepos = (db: DatabaseSync): Repo[] => all<Repo>(db, 'SELECT * FROM repos ORDER BY id');
+
 export const getRepo = (db: DatabaseSync, id: string): Repo | undefined => get<Repo>(db, 'SELECT * FROM repos WHERE id=?', id);
 
 export function createTicket(db: DatabaseSync, t: { repoId: string; title: string; body: string }): Ticket {
