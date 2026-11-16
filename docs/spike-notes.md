@@ -45,3 +45,9 @@ Environment: `sbx` v0.51.0 and Claude Code 2.1.325 on the host. The default `cla
 - **Remove:** `sbx rm --force <name>`. Plain `rm` prompts and fails without a tty.
 - Always pass `--no-input` on create and template commands; otherwise they prompt and fail without a tty.
 - No per-sandbox egress or auth commands are needed. Both come from global sbx config.
+
+## Found in Task 13 (end-to-end)
+
+- The Windows workspace mount (virtiofs) cannot hold symlinks and shows every file as 0777. `npm ci` and `uv sync` failed, and ruff flagged EXE002. `src/sandbox-prep.py` handles this before every exec; see `docs/manual-check.md`.
+- sbx refuses a `:ro` primary workspace. Only extra mounts can be `:ro`.
+- sbx stops idle sandboxes, and `sbx exec` restarts them. Container files persist across the restart, but in-sandbox mounts do not.
